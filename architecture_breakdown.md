@@ -1,0 +1,313 @@
+# ProCoder Recursive Architecture Breakdown
+
+- **Directory: actuator/**
+  - **File: agent_io.ex** (`procoder/actuator/agent_io.ex`) - Purpose: A security-hardened IO interface for agents. This module acts as a bridge between sandboxed agents and the filesystem, enforcing path containment and operation whitelisting.
+  - **File: cdms_telemetry.ex** (`procoder/actuator/cdms_telemetry.ex`) - Purpose: WebSocket client that connects to the CDMS event stream to capture cognitive anomalies, Ghost Nodes, and dialectical arbitration events.
+  - **Directory: execution_layer/**
+    - **File: port_wrapper.ex** (`procoder/actuator/execution_layer/port_wrapper.ex`) - Purpose: A robust, sandboxed wrapper around Erlang Ports for executing shell commands. Provides security, observability, and resource isolation using Bubblewrap (Linux) or Seatbelt (macOS).
+  - **Directory: policy_logic/**
+    - **File: policy_engine.ex** (`procoder/actuator/policy_logic/policy_engine.ex`) - Purpose: The PolicyEngine is the critical decision-making gatekeeper of the ProCoder autonomous system. It implements a multi-factor risk heuristic to assess agent actions (e.g., shell commands, code modifications) and determine if they should be executed, reviewed, or rejected. Heuristic: R = W_c * Entropy + W_u * Uncertainty + W_i * Impact
+  - **File: supervisor.ex** (`procoder/actuator/supervisor.ex`) - Purpose: Supervises the Actuator subsystem, including the PolicyEngine and execution layers.
+- **Directory: application_logic/**
+  - **File: application.ex** (`procoder/application_logic/application.ex`) - Purpose: The primary entry point and lifecycle orchestrator for the ProCoder system. Supervises the entire subsystem tree in accordance with the OTP specification.
+- **Directory: brain/**
+  - **Directory: client_engine/**
+    - **Directory: .acn/**
+    - **File: embedding_worker.ex** (`procoder/brain/client_engine/embedding_worker.ex`) - Purpose: Worker for generating text embeddings using Bumblebee and EXLA. It loads the model on startup and serves synchronous embedding requests.
+    - **Directory: llm_client/**
+      - **Directory: adapters/**
+        - **File: gemini_adapter.ex** (`procoder/brain/client_engine/llm_client/adapters/gemini_adapter.ex`) - Purpose: Adapter for Google's Gemini API using native Function Calling. Instead of asking the model to emit a JSON blob in text (fragile, unparseable), this adapter: 1. Sends all agent tools as typed `function_declarations` to the Gemini API. 2. Sets `function_calling_config.mode = ANY` to guarantee the model always returns a structured `functionCall` part — never raw prose. 3. Returns a `{:ok, ToolCallResponse}` struct with the thought text and a list of `{tool_name, args_map}` tuples ready to dispatch — zero JSON parsing needed. Multi-turn history (tool results) must be passed in following the Gemini native `functionResponse` format (see `build_tool_result_turn/1`).
+        - **File: openai_adapter.ex** (`procoder/brain/client_engine/llm_client/adapters/openai_adapter.ex`) - Purpose: Not documented.
+        - **File: provider_adapter.ex** (`procoder/brain/client_engine/llm_client/adapters/provider_adapter.ex`) - Purpose: Provider-specific adapter for ProCoder LLM interactions. Maps internal `ProCoder.Core.Types.Message` to vendor-specific formats and handles streaming, error correction, and telemetry.
+      - **Directory: behavior/**
+        - **File: llm_adapter.ex** (`procoder/brain/client_engine/llm_client/behavior/llm_adapter.ex`) - Purpose: The `ProCoder.Brain.Client.Adapter` behavior defines the functional contract for all AI provider implementations within the ProCoder system. This behavior mandates the interface for synchronous request-response interactions and asynchronous streaming interactions, ensuring compatibility with the `gen_statem` orchestrator and the `Finch`-based HTTP communication layer.
+      - **Directory: engine/**
+        - **File: llm_client_engine.ex** (`procoder/brain/client_engine/llm_client/engine/llm_client_engine.ex`) - Purpose: The primary orchestration hub for LLM-related IO operations. Bridges high-level gen_statem interactions with low-level HTTP/2 streaming via Finch.
+      - **Directory: http_pool/**
+        - **File: pool_manager.ex** (`procoder/brain/client_engine/llm_client/http_pool/pool_manager.ex`) - Purpose: A static manager for LLM HTTP pools. Returns the global Finch pool name.
+      - **Directory: requirements/**
+        - **File: dependencies.ex** (`procoder/brain/client_engine/llm_client/requirements/dependencies.ex`) - Purpose: Not documented.
+      - **File: requirements.ex** (`procoder/brain/client_engine/llm_client/requirements.ex`) - Purpose: Defines the dependency requirements and foundational data structures for the ProCoder LLM Client. This module provides the specification for streaming token handling, SSE parsing, and JSON ingestion, ensuring compatibility with the high-concurrency requirements of the BEAM-based architecture.
+      - **Directory: sse_parser/**
+        - **File: sse_parser.ex** (`procoder/brain/client_engine/llm_client/sse_parser/sse_parser.ex`) - Purpose: Not documented.
+      - **File: sse_parser.ex** (`procoder/brain/client_engine/llm_client/sse_parser.ex`) - Purpose: High-performance SSE stream parser for LLM token ingestion. This module implements a line-buffered state machine for parsing Server-Sent Events (SSE) as defined in the HTML5 specification. It extracts data frames, performs hardened JSON decoding, and propagates events to the orchestrating GenServer.
+      - **Directory: telemetry/**
+        - **File: event_monitor.ex** (`procoder/brain/client_engine/llm_client/telemetry/event_monitor.ex`) - Purpose: Telemetry event monitor for the ProCoder LLM client. This module handles the sanitization and dispatch of observability events originating from the client engine, SSE parser, and rate limiter. It adheres to security compliance by enforcing automated data redaction on all metadata maps before telemetry dispatch.
+        - **File: telemetry_instrumentation.ex** (`procoder/brain/client_engine/llm_client/telemetry/telemetry_instrumentation.ex`) - Purpose: Not documented.
+        - **File: telemetry_instrumenter.ex** (`procoder/brain/client_engine/llm_client/telemetry/telemetry_instrumenter.ex`) - Purpose: Not documented.
+      - **Directory: tests/**
+  - **Directory: governance/**
+    - **File: rate_limiter.ex** (`procoder/brain/governance/rate_limiter.ex`) - Purpose: High-performance token bucket rate limiter for ProCoder LLM API interactions. Utilizes ETS for atomic, lock-free access to bucket state across the agent swarm.
+  - **Directory: memory_store/**
+    - **Directory: .acn/**
+    - **Directory: memory_subsystem/**
+      - **Directory: cache/**
+        - **File: cache_engine.ex** (`procoder/brain/memory_store/memory_subsystem/cache/cache_engine.ex`) - Purpose: The CacheEngine provides a high-performance, volatile, and isolated ETS-backed memory repository for autonomous agent sessions. Each agent session is assigned a dedicated ETS table, ensuring process isolation, high throughput, and sub-millisecond retrieval of cognitive state.
+      - **Directory: compactor/**
+        - **File: compactor.ex** (`procoder/brain/memory_store/memory_subsystem/compactor/compactor.ex`) - Purpose: The Compactor GenServer manages TTL-based memory cleanup and summarization orchestration within the ProCoder brain subsystem. It monitors session memory tables and dispatches stale segments to the Summarizer.
+      - **Directory: config/**
+        - **File: memory_config.ex** (`procoder/brain/memory_store/memory_subsystem/config/memory_config.ex`) - Purpose: Configuration interface for the ProCoder Brain Memory Subsystem. Provides a centralized, type-safe way to access memory subsystem parameters defined in the application environment. These values are injected at runtime by `ProCoder.Config.RuntimeInitializer`.
+      - **Directory: docs/**
+      - **Directory: summarizer/**
+        - **File: summarizer.ex** (`procoder/brain/memory_store/memory_subsystem/summarizer/summarizer.ex`) - Purpose: Not documented.
+        - **File: summarizer_engine.ex** (`procoder/brain/memory_store/memory_subsystem/summarizer/summarizer_engine.ex`) - Purpose: Not documented.
+      - **File: summarizer.ex** (`procoder/brain/memory_store/memory_subsystem/summarizer.ex`) - Purpose: The cognitive distillation engine for the ProCoder memory subsystem. Handles redaction, semantic summarization, and cognitive snapshot generation.
+      - **File: supervisor.ex** (`procoder/brain/memory_store/memory_subsystem/supervisor.ex`) - Purpose: The supervisor for the ProCoder Brain memory subsystem. Manages the lifecycle of core memory components: - CacheEngine: Volatile session memory storage (ETS). - Compactor: TTL-based memory maintenance and distillation. - Summarizer: Semantic log summarization and redaction engine. Utilizes a :one_for_one restart strategy to ensure granular recovery of independent memory services while maintaining system-wide stability.
+      - **Directory: tests/**
+      - **Directory: types/**
+        - **File: agent_state.ex** (`procoder/brain/memory_store/memory_subsystem/types/agent_state.ex`) - Purpose: Not documented.
+      - **File: types.ex** (`procoder/brain/memory_store/memory_subsystem/types.ex`) - Purpose: Not documented.
+  - **File: model_profiles.ex** (`procoder/brain/model_profiles.ex`) - Purpose: Defines model-specific configuration and prompt templates for adaptive context engineering.
+  - **Directory: prompt_logic/**
+    - **Directory: .acn/**
+    - **Directory: engine/**
+      - **Directory: core/**
+        - **Directory: .acn/**
+        - **File: orchestrator.ex** (`procoder/brain/prompt_logic/engine/core/orchestrator.ex`) - Purpose: The central cognitive hub of the ProCoder brain subsystem. Implements a stateless transformation pipeline to convert heterogeneous input data into high-salience, security-hardened message arrays for LLM ingestion.
+        - **File: prompt_engine_orchestrator.ex** (`procoder/brain/prompt_logic/engine/core/prompt_engine_orchestrator.ex`) - Purpose: Not documented.
+      - **Directory: corrector/**
+        - **File: json_corrector.ex** (`procoder/brain/prompt_logic/engine/corrector/json_corrector.ex`) - Purpose: Not documented.
+      - **File: corrector.ex** (`procoder/brain/prompt_logic/engine/corrector.ex`) - Purpose: The JSON Correction Module for the ProCoder PromptEngine. Responsible for intercepting malformed tool calls, validating against schemas, redacting sensitive information, and generating structured feedback prompts for the LLM to facilitate one-shot error correction.
+      - **Directory: docs/**
+      - **Directory: formatter/**
+        - **File: formatter.ex** (`procoder/brain/prompt_logic/engine/formatter/formatter.ex`) - Purpose: Responsible for formatting prompt logic data structures into strings suitable for processing by the engine.
+        - **File: message_formatter.ex** (`procoder/brain/prompt_logic/engine/formatter/message_formatter.ex`) - Purpose: Not documented.
+      - **Directory: ranker/**
+        - **File: salience_ranker.ex** (`procoder/brain/prompt_logic/engine/ranker/salience_ranker.ex`) - Purpose: The SalienceRanker acts as the critical cognitive filter for the ProCoder PromptEngine. It ranks, weights, and prunes raw context components based on a 'gradient of precision' algorithm to ensure high-salience message arrays for LLM ingestion.
+      - **Directory: requirements/**
+        - **File: engine_requirements.ex** (`procoder/brain/prompt_logic/engine/requirements/engine_requirements.ex`) - Purpose: Not documented.
+        - **File: prompt_engine_requirements.ex** (`procoder/brain/prompt_logic/engine/requirements/prompt_engine_requirements.ex`) - Purpose: Requirements and dependency specification for the ProCoder PromptEngine. This module defines the foundational requirements, constraints, and mandatory dependencies for the PromptEngine logic, ensuring architectural consistency with the ProCoder system requirements.
+      - **Directory: tests/**
+  - **File: supervisor.ex** (`procoder/brain/supervisor.ex`) - Purpose: The `ProCoder.Brain.Supervisor` is the domain supervisor for the Brain Subsystem. It governs the lifecycle of the LLM connection pool, prompt engineering, memory persistence, and rate limiting.
+- **Directory: config/**
+  - **File: runtime_initializer.ex** (`procoder/config/runtime_initializer.ex`) - Purpose: Responsible for boot-time configuration validation and injection. Ensures that the environment adheres to the security and operational requirements of the ProCoder architecture.
+- **Directory: control_plane/**
+  - **Directory: local_server/**
+    - **File: endpoint.ex** (`procoder/control_plane/local_server/endpoint.ex`) - Purpose: The LocalServer Endpoint provides a Phoenix-based interface for external tools to interact with the ProCoder system via HTTP and WebSockets.
+  - **File: supervisor.ex** (`procoder/control_plane/supervisor.ex`) - Purpose: Supervises the CommandRouter and TUI interface.
+- **Directory: core/**
+  - **Directory: agent_logic/**
+    - **File: agent_fsm.ex** (`procoder/core/agent_logic/agent_fsm.ex`) - Purpose: The primary cognitive controller for an individual autonomous coding agent. Implements a gen_statem to manage transitions across the agent lifecycle. Tool use is powered by the Gemini native Function Calling API: - The adapter sends all tools as typed function_declarations with mode: ANY. - Each LLM turn returns {:ok, %{thought: t, tool_calls: [{name, args}]}} — zero JSON parsing required. - Multiple tool calls per turn are dispatched via execute_batch / verify_batch FSM events, enabling true multi-tool sequencing.
+    - **File: tool_definitions.ex** (`procoder/core/agent_logic/tool_definitions.ex`) - Purpose: Single source of truth for all agent tool/function declarations. Each tool is a Gemini-compatible function declaration map with: - name: atom string matching perform_action/3 dispatch key - description: clear, terse guidance so the model picks the right tool - parameters: strongly-typed JSON Schema (per-tool, NOT shared) Usage: ToolDefinitions.all_tools() -> list of function declaration maps
+  - **Directory: history_management/**
+    - **Directory: .acn/**
+    - **File: archive_manager.ex** (`procoder/core/history_management/archive_manager.ex`) - Purpose: Manages the persistence and retrieval of conversation archives as JSON files.
+    - **Directory: rewind_manager/**
+      - **Directory: coordinator/**
+        - **File: rewind_coordinator.ex** (`procoder/core/history_management/rewind_manager/coordinator/rewind_coordinator.ex`) - Purpose: The RewindCoordinator orchestrates atomic transitions between system memory state and filesystem worktrees. It guarantees synchronization by coordinating the HistoryStackEngine, FilesystemReverter, and MemorySnapshotManager.
+      - **Directory: docs/**
+      - **Directory: fs_reverter/**
+        - **File: filesystem_reverter.ex** (`procoder/core/history_management/rewind_manager/fs_reverter/filesystem_reverter.ex`) - Purpose: The FilesystemReverter performs secure, atomic, and sandboxed Git filesystem reverts. It acts as the low-level bridge for the RewindManager, interacting with the system Git implementation via the sandboxed PortWrapper service.
+      - **File: memory_snapshot_manager.ex** (`procoder/core/history_management/rewind_manager/memory_snapshot_manager.ex`) - Purpose: The MemorySnapshotManager provides high-performance, secure serialization and de-serialization for the ProCoder cognitive persistence layer. It performs mandatory PII redaction and structural validation to ensure agent state integrity during /rewind operations.
+      - **File: rewind_manager.ex** (`procoder/core/history_management/rewind_manager/rewind_manager.ex`) - Purpose: The RewindManager is the cognitive safety net for the ProCoder autonomous system. It manages a LIFO stack of state snapshots for atomic rollback of memory state and filesystem worktrees.
+      - **Directory: snapshot_manager/**
+        - **File: memory_snapshot_manager.ex** (`procoder/core/history_management/rewind_manager/snapshot_manager/memory_snapshot_manager.ex`) - Purpose: Not documented.
+      - **File: snapshot_manager.ex** (`procoder/core/history_management/rewind_manager/snapshot_manager.ex`) - Purpose: Not documented.
+      - **Directory: stack_engine/**
+        - **File: history_stack_engine.ex** (`procoder/core/history_management/rewind_manager/stack_engine/history_stack_engine.ex`) - Purpose: The HistoryStackEngine manages LIFO persistence for ProCoder state snapshots. It uses a two-tiered architecture: an ETS-backed hot stack for instant retrieval and SQLite (via ProCoder.Repo) for durable cold storage.
+      - **Directory: supervision/**
+        - **File: rewind_supervisor.ex** (`procoder/core/history_management/rewind_manager/supervision/rewind_supervisor.ex`) - Purpose: The RewindSupervisor serves as the architectural anchor for the Rewind subsystem. It orchestrates the lifecycle, fault isolation, and dependency ordering of the RewindCoordinator, HistoryStackEngine, and FilesystemReverter components. Ensures 'Atomic Revertibility' by supervising processes in a strict topological order and providing isolated recovery for each service.
+      - **Directory: tests/**
+  - **Directory: orchestration_layer/**
+    - **Directory: .acn/**
+    - **Directory: session_manager_impl/**
+      - **Directory: docs/**
+      - **Directory: persistence_layer/**
+        - **File: persistence.ex** (`procoder/core/orchestration_layer/session_manager_impl/persistence_layer/persistence.ex`) - Purpose: Persistence layer for agent session management using Ecto. Handles saving, retrieving, and updating session state to ensure agent persistence and recovery.
+        - **File: persistence_handler.ex** (`procoder/core/orchestration_layer/session_manager_impl/persistence_layer/persistence_handler.ex`) - Purpose: Not documented.
+        - **File: session_persistence_coordinator.ex** (`procoder/core/orchestration_layer/session_manager_impl/persistence_layer/session_persistence_coordinator.ex`) - Purpose: Not documented.
+        - **File: session_persistence_handler.ex** (`procoder/core/orchestration_layer/session_manager_impl/persistence_layer/session_persistence_handler.ex`) - Purpose: Not documented.
+      - **Directory: requirements/**
+        - **File: session_manager_requirements.ex** (`procoder/core/orchestration_layer/session_manager_impl/requirements/session_manager_requirements.ex`) - Purpose: Mandatory environment requirements and dependency manifest for the ProCoder SessionManager. Ensures the environment is securely provisioned, resources are scaled dynamically, and essential system tools (Bubblewrap, Registry) are available.
+      - **Directory: security_logic/**
+        - **File: worktree_validator.ex** (`procoder/core/orchestration_layer/session_manager_impl/security_logic/worktree_validator.ex`) - Purpose: The 'WorktreeValidator' module is the central security guardrail for the ProCoder SessionManager, responsible for maintaining strict worktree isolation and ensuring filesystem integrity for all autonomous agent workspaces.
+      - **Directory: supervisor_core/**
+        - **File: session_manager.ex** (`procoder/core/orchestration_layer/session_manager_impl/supervisor_core/session_manager.ex`) - Purpose: The SessionManager acts as the primary runtime orchestrator for autonomous coding agents within the ProCoder swarm architecture. By leveraging a DynamicSupervisor pattern, it provides robust, high-concurrency life-cycle management for ephemeral agent instances, ensuring that each worker process remains isolated within a sandboxed Git worktree.
+      - **Directory: telemetry_layer/**
+        - **File: session_telemetry.ex** (`procoder/core/orchestration_layer/session_manager_impl/telemetry_layer/session_telemetry.ex`) - Purpose: The SessionTelemetry module provides the Telemetry Engine for the ProCoder SessionManager. It tracks agent density, churn rates, and resource utilization using atomic ETS counters and periodic sampling of agent processes.
+        - **File: telemetry_hooks.ex** (`procoder/core/orchestration_layer/session_manager_impl/telemetry_layer/telemetry_hooks.ex`) - Purpose: Not documented.
+      - **Directory: tests/**
+      - **Directory: worktree_engine/**
+        - **File: worktree_manager.ex** (`procoder/core/orchestration_layer/session_manager_impl/worktree_engine/worktree_manager.ex`) - Purpose: The WorktreeManager is the foundational infrastructure service responsible for the secure, high-concurrency provisioning of isolated Git worktrees. As specified in the architectural blueprint, it acts as a gatekeeper for agent filesystem isolation, preventing cross-agent contamination and enforcing strict containment within a defined WORKTREE_ROOT.
+  - **Directory: search/**
+    - **File: web_search.ex** (`procoder/core/search/web_search.ex`) - Purpose: Skill for performing grounded web searches using the Gemini Search tool. This allows the agent to find documentation and community solutions for complex errors.
+  - **Directory: types/**
+    - **File: agent_types.ex** (`procoder/core/types/agent_types.ex`) - Purpose: Primary state container for an individual ProCoder worker process.
+- **File: cyber_security_agent_demo.ex** (`procoder/cyber_security_agent_demo.ex`) - Purpose: A custom agent built using the ProCoder Macro DSL for security analysis. This agent demonstrates how the DSL can be used to specialize agents for complex domains.
+- **File: debug_agent.ex** (`procoder/debug_agent.ex`) - Purpose: Not documented.
+- **Directory: memory/**
+  - **File: context_store.ex** (`procoder/memory/context_store.ex`) - Purpose: Manages ephemeral memory using ETS (Erlang Term Storage). Provides public read access and protected write access for session context.
+  - **File: supervisor.ex** (`procoder/memory/supervisor.ex`) - Purpose: Supervises the ephemeral context stores (ETS) and persistent stores (Ecto).
+- **Directory: planner/**
+  - **Directory: logic_engine/**
+    - **Directory: .acn/**
+    - **Directory: dag_orchestrator/**
+      - **Directory: actor/**
+        - **File: planner_genserver.ex** (`procoder/planner/logic_engine/dag_orchestrator/actor/planner_genserver.ex`) - Purpose: The PlannerGenServer serves as the central cognitive orchestrator for task execution within the ProCoder DAG architecture. It manages the full lifecycle of a task plan, state transitions, persistence hooks, and recovery coordination, ensuring fault-tolerant, concurrent orchestration.
+      - **Directory: docs/**
+      - **Directory: engine/**
+        - **Directory: .acn/**
+        - **Directory: dag_manager/**
+          - **Directory: core_engine/**
+            - **File: graph_engine_server.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/core_engine/graph_engine_server.ex`) - Purpose: The GraphEngineServer is the central cognitive hub for the ProCoder DAG Orchestrator. It maintains the state of the execution plan, processes atomic graph mutations, and orchestrates task lifecycles through topological validation and persistence.
+          - **Directory: dispatch_logic/**
+            - **File: dispatch_coordinator.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/dispatch_logic/dispatch_coordinator.ex`) - Purpose: The Topological Dispatch Sequencer (TDS) is responsible for the orchestration of task execution within the ProCoder DAG Orchestrator. It interfaces with libgraph for topological sorting, maintains a ready-queue of dispatchable nodes, enforces rate-limiting, and manages task lifecycles via the SessionManager.
+          - **Directory: docs/**
+          - **Directory: persistence/**
+            - **File: persistence.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/persistence/persistence.ex`) - Purpose: The PersistenceEngine provides a durable storage and version control layer for the DAG. It manages state snapshots, enables audit trails, and facilitates /rewind functionality through a two-tiered (Hot/Cold) memory and storage architecture.
+          - **Directory: recovery_logic/**
+            - **File: failure_remediation_engine.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/recovery_logic/failure_remediation_engine.ex`) - Purpose: Not documented.
+            - **File: failure_remediator.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/recovery_logic/failure_remediator.ex`) - Purpose: The FailureRemediator module handles autonomous self-healing for the ProCoder DAG Orchestrator. It intercepts task failures, performs recursive subgraph traversal to identify impacted nodes, and dynamically generates and validates compensation subgraphs to restore system integrity.
+            - **File: remediation_subgraph_generator.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/recovery_logic/remediation_subgraph_generator.ex`) - Purpose: Not documented.
+          - **Directory: requirements/**
+            - **File: dag_requirements.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/requirements/dag_requirements.ex`) - Purpose: The authoritative, immutable source of truth for the DAG orchestration engine's environmental and dependency configuration. This module enforces system-wide constraints, validates runtime dependencies, and provides a secure integrity check mechanism for the ProCoder Planner.
+            - **File: dependency_validator.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/requirements/dependency_validator.ex`) - Purpose: Not documented.
+          - **Directory: supervision/**
+            - **File: dag_orchestrator_supervisor.ex** (`procoder/planner/logic_engine/dag_orchestrator/engine/dag_manager/supervision/dag_orchestrator_supervisor.ex`) - Purpose: The apex supervisor for a single DAG orchestrator planning session. Manages the lifecycle of: 1. PersistenceEngine (Durability) 2. GraphEngineServer (DAGEngine / State) 3. DispatchCoordinator (Scheduler) 4. FailureRemediator (RecoveryManager) Enforces ordered startup and granular fault isolation using a :one_for_one strategy.
+          - **Directory: tests/**
+      - **Directory: lifecycle/**
+        - **File: task_state.ex** (`procoder/planner/logic_engine/dag_orchestrator/lifecycle/task_state.ex`) - Purpose: The Task State Machine module for the ProCoder DAG Orchestrator. Manages the lifecycle transitions of TaskNodes, ensuring structural integrity, telemetry emission, and triggering of remediation subgraphs upon failure.
+      - **Directory: recovery/**
+        - **File: recovery_manager.ex** (`procoder/planner/logic_engine/dag_orchestrator/recovery/recovery_manager.ex`) - Purpose: The RecoveryManager acts as the ProCoder's fault-tolerance unit, orchestrating remediation subgraphs when task nodes fail within the DAG. It follows a tiered strategy ranging from simple retries to manual intervention signaling, ensuring system state consistency through validated graph manipulations.
+      - **Directory: requirements/**
+        - **File: dag_requirements.ex** (`procoder/planner/logic_engine/dag_orchestrator/requirements/dag_requirements.ex`) - Purpose: Not documented.
+        - **File: dependencies.ex** (`procoder/planner/logic_engine/dag_orchestrator/requirements/dependencies.ex`) - Purpose: Authoritative dependency manifest for the ProCoder DAG Orchestrator. Ensures structural integrity and environment compliance for graph-based planning.
+      - **Directory: tests/**
+      - **File: types.ex** (`procoder/planner/logic_engine/dag_orchestrator/types.ex`) - Purpose: Foundational data structures for the ProCoder Planner's DAG orchestration engine.
+      - **Directory: validation/**
+        - **File: graph_validator.ex** (`procoder/planner/logic_engine/dag_orchestrator/validation/graph_validator.ex`) - Purpose: The GraphValidator component acts as the safety and integrity layer for the ProCoder DAG orchestrator. It ensures the structural soundness of execution plans by enforcing acyclicity, reachability, and referential integrity.
+- **File: registry.ex** (`procoder/registry.ex`) - Purpose: Global registry for ProCoder processes, including sessions and agents.
+- **Directory: repo/**
+  - **File: repo.ex** (`procoder/repo/repo.ex`) - Purpose: The primary persistence layer for the ProCoder system. Integrates with Ecto and the SQLite3 adapter to provide a resilient, high-performance graph-based data storage solution. This module is supervised by the application tree and utilizes dynamic connection pooling based on the host system's hardware capabilities.
+- **Directory: schemas/**
+  - **Directory: persistence/**
+    - **Directory: .acn/**
+    - **Directory: ecto_schemas/**
+      - **Directory: ast_edges/**
+        - **File: ast_edge.ex** (`procoder/schemas/persistence/ecto_schemas/ast_edges/ast_edge.ex`) - Purpose: Not documented.
+        - **File: relationship.ex** (`procoder/schemas/persistence/ecto_schemas/ast_edges/relationship.ex`) - Purpose: Not documented.
+      - **Directory: ast_nodes/**
+        - **File: code_graph_node.ex** (`procoder/schemas/persistence/ecto_schemas/ast_nodes/code_graph_node.ex`) - Purpose: Ecto schema representing an AST node within the ProCoder CodeGraph. Stores structural metadata, source location, and integrity hashes.
+      - **Directory: dag_nodes/**
+        - **File: task_node.ex** (`procoder/schemas/persistence/ecto_schemas/dag_nodes/task_node.ex`) - Purpose: Ecto schema for TaskNode persistence within the ProCoder DAG structure. Facilitates task scheduling, dependency tracking, and failure recovery through self-referential recovery node linkages. Designed for high-concurrency environments using binary UUIDs and JSONB-compatible payload storage.
+      - **Directory: docs/**
+      - **Directory: session_state/**
+        - **File: session.ex** (`procoder/schemas/persistence/ecto_schemas/session_state/session.ex`) - Purpose: Ecto schema representing the persistent state of an autonomous agent session. Provides fault-tolerant state recovery through context snapshots and ensures filesystem isolation by pinning agent worktrees to specific, validated directories.
+        - **File: snapshot.ex** (`procoder/schemas/persistence/ecto_schemas/session_state/snapshot.ex`) - Purpose: Ecto schema for ProCoder state snapshots. Used for cognitive persistence and /rewind functionality.
+      - **Directory: utils/**
+        - **File: schema_utils.ex** (`procoder/schemas/persistence/ecto_schemas/utils/schema_utils.ex`) - Purpose: Standardized utility library for the ProCoder persistence layer. Provides primitives for cryptographic integrity, UUID generation, and changeset validation.
+    - **Directory: schema_definitions/**
+- **Directory: sdk/**
+  - **Directory: dsl_engine/**
+    - **Directory: .acn/**
+    - **Directory: macro_dsl/**
+      - **Directory: agents/**
+        - **File: agent_macro.ex** (`procoder/sdk/dsl_engine/macro_dsl/agents/agent_macro.ex`) - Purpose: The `defagent` macro provides a declarative DSL for defining autonomous, headless coding agents within the ProCoder swarm architecture.
+      - **Directory: core_types/**
+        - **File: agent_types.ex** (`procoder/sdk/dsl_engine/macro_dsl/core_types/agent_types.ex`) - Purpose: Foundational data structures for the ProCoder SDK Macro DSL. This module defines the structural primitives required for defining custom, headless autonomous agents. It enforces cognitive persistence via metadata tracking and integrates with the core gen_statem lifecycle requirements.
+      - **Directory: docs/**
+      - **Directory: lifecycle/**
+        - **File: lifecycle_utils.ex** (`procoder/sdk/dsl_engine/macro_dsl/lifecycle/lifecycle_utils.ex`) - Purpose: Functional primitives for the ProCoder SDK lifecycle macro DSL. Provides AST synthesis helpers for `gen_statem` callbacks and persistence hooks.
+      - **Directory: persistence/**
+        - **Directory: .acn/**
+        - **Directory: hooks/**
+          - **Directory: docs/**
+          - **Directory: interface/**
+            - **File: persistence_dsl.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/interface/persistence_dsl.ex`) - Purpose: Not documented.
+            - **File: persistence_interface.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/interface/persistence_interface.ex`) - Purpose: The declarative interface for ProCoder cognitive persistence. Provides high-level macros for managing agent state lifecycle: - `persist`: Declarative annotation for automatic asynchronous field tracking. - `snapshot`: Manual point-in-time atomic state capture. - `rewind`: Coordinated, transactional state and worktree restoration.
+          - **Directory: persist_engine/**
+            - **File: persist_macro.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/persist_engine/persist_macro.ex`) - Purpose: Defines the `persist` macro for declarative state persistence in ProCoder agents. This macro automatically injects the necessary logic for field registration, lifecycle interception (via `handle_event` or state functions), and asynchronous persistence dispatch, ensuring zero-cost cognitive persistence.
+          - **Directory: requirements/**
+            - **File: requirements.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/requirements/requirements.ex`) - Purpose: Mandatory dependency, schema, and environment requirements for the Persistence Macro DSL. This module serves as the configuration and integrity gatekeeper for all macros synthesized for cognitive state persistence (snapshotting, rewinding, and LIFO history). It ensures that the host process and supervision tree meet the necessary security and fault-tolerance requirements for atomic state synchronization.
+          - **Directory: rewind_engine/**
+            - **File: rewind_macro.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/rewind_engine/rewind_macro.ex`) - Purpose: The 'rewind' macro implementation for the ProCoder Persistence DSL. Provides a high-level, declarative interface for transactional agent state restoration. The macro orchestrates the entire recovery sequence, including: 1. Context validation (SessionManager check). 2. History stack retrieval (Repo/MemoryStore). 3. Hash integrity verification. 4. Triple-layer atomic rollback (Session suspension, Filesystem revert, Memory rehydration). 5. Compensation (reversion + supervision restart) on failure.
+          - **Directory: security/**
+            - **File: redaction_pipeline.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/security/redaction_pipeline.ex`) - Purpose: The Redaction and Security Pipeline for ProCoder Persistence Hooks. Acts as a critical gatekeeper for the cognitive persistence infrastructure, identifying, redacting, and replacing sensitive agent information before committing to the persistence layer (Repo/History Stack).
+          - **Directory: snapshot_engine/**
+            - **File: snapshot_engine.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/snapshot_engine/snapshot_engine.ex`) - Purpose: The industrial-grade Snapshot Engine for the ProCoder SDK. Provides atomic, secure, and verifiable point-in-time snapshots of autonomous agent cognitive states.
+          - **Directory: tests/**
+          - **Directory: validation/**
+            - **File: dsl_validator.ex** (`procoder/sdk/dsl_engine/macro_dsl/persistence/hooks/validation/dsl_validator.ex`) - Purpose: Compile-time static analysis validator for the Persistence DSL. Enforces security, lifecycle, and structural integrity for agents utilizing ProCoder's Persistence macros. Performs deep AST analysis to detect forbidden path operations, missing transactional blocks, and potential data leakage at compile-time.
+      - **Directory: requirements/**
+        - **File: dsl_requirements.ex** (`procoder/sdk/dsl_engine/macro_dsl/requirements/dsl_requirements.ex`) - Purpose: Not documented.
+        - **File: sdk_requirements.ex** (`procoder/sdk/dsl_engine/macro_dsl/requirements/sdk_requirements.ex`) - Purpose: Mandatory dependency and environment requirements for the ProCoder Developer SDK. This module acts as the integrity validator for agent-defined macros, ensuring that any code synthesized via the SDK DSL conforms to the system's architectural constraints (OTP 26+, Elixir 1.15+, and secure infrastructure).
+      - **Directory: skills/**
+        - **File: skill_macro.ex** (`procoder/sdk/dsl_engine/macro_dsl/skills/skill_macro.ex`) - Purpose: The `defskill` macro implementation for the ProCoder SDK. Provides a declarative interface for defining sandboxed, risk-assessed, and fault-tolerant procedural skills.
+      - **Directory: tests/**
+      - **Directory: validation/**
+        - **File: dsl_validator.ex** (`procoder/sdk/dsl_engine/macro_dsl/validation/dsl_validator.ex`) - Purpose: Compile-time validation engine for the ProCoder DSL. This module performs static semantic analysis on agents and skills defined via the ProCoder DSL macros, enforcing security, sandbox isolation, and rate-limiting compliance.
+- **Directory: search/**
+  - **File: codegraph_engine.ex** (`procoder/search/codegraph_engine.ex`) - Purpose: Low-level NIF interface for tree-sitter based AST parsing and indexing.
+  - **Directory: coordinator_logic_engine/**
+    - **Directory: .acn/**
+    - **Directory: coordinator_core/**
+      - **Directory: adapters/**
+        - **Directory: cdms_layer/**
+          - **File: cdms_adapter.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/adapters/cdms_layer/cdms_adapter.ex`) - Purpose: The Adapter linking ProCoder's Search Coordinator to the Cognitive Digital Modelling System (CDMS). Replaces VectorStoreAdapter for high-level semantic, brainstorming, and graph queries.
+        - **Directory: lsp_layer/**
+          - **File: lsp_adapter.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/adapters/lsp_layer/lsp_adapter.ex`) - Purpose: The LSP Adapter implements the ProCoder.Search.Adapter behavior, acting as the primary, high-precision retrieval mechanism for code navigation. It bridges the Search Coordinator with the system-wide LSP Manager.
+        - **Directory: text_layer_engine/**
+          - **File: text_engine_adapter.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/adapters/text_layer_engine/text_engine_adapter.ex`) - Purpose: The `TextEngineAdapter` implementation of the `ProCoder.Search.Adapter` behavior. This engine utilizes `ripgrep` via the `ProCoder.Actuator.PortWrapper` to perform filesystem-wide text searches within the sandboxed worktree. It provides non-blocking execution, standardized result normalization, and telemetry reporting.
+        - **Directory: vector_layer_store/**
+          - **File: vector_store_adapter.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/adapters/vector_layer_store/vector_store_adapter.ex`) - Purpose: Implementation of the `ProCoder.Search.Adapter` for semantic retrieval using `sqlite-vec`. This module handles embedding-based similarity searching against the indexed code graph, ensuring asynchronous, non-blocking execution and strict threshold enforcement.
+      - **Directory: engine/**
+        - **Directory: fsm_core_logic_engine/**
+          - **File: search_coordinator.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/engine/fsm_core_logic_engine/search_coordinator.ex`) - Purpose: Not documented.
+          - **File: search_coordinator_fsm.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/engine/fsm_core_logic_engine/search_coordinator_fsm.ex`) - Purpose: Not documented.
+        - **File: fsm_core_logic_engine.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/engine/fsm_core_logic_engine.ex`) - Purpose: Search Coordinator state machine implemented using `gen_statem`. Manages the lifecycle and orchestration of search requests.
+        - **Directory: public_api_interface/**
+          - **File: search_coordinator_server.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/engine/public_api_interface/search_coordinator_server.ex`) - Purpose: The SearchCoordinatorServer acts as the primary, fault-tolerant, and asynchronous public API gateway for the ProCoder search ecosystem. It serves as the bridge between external callers (Planner, LLM Brain) and the SearchCoordinator gen_statem.
+      - **Directory: interfaces/**
+        - **File: search_adapter.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/interfaces/search_adapter.ex`) - Purpose: The `ProCoder.Search.Adapter` behavior defines the polymorphic contract for all search retrieval backends (LSP, Text Engine, Vector Store) within the 'Gradient of Precision' search cascade. All implementations must ensure non-blocking, asynchronous execution and adhere to standardized result formatting and telemetry reporting.
+      - **Directory: logic/**
+        - **Directory: error_recovery/**
+          - **File: search_error_handler.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/logic/error_recovery/search_error_handler.ex`) - Purpose: The SearchErrorHandler module orchestrates the 'Gradient of Precision' search cascade. It acts as a stateless decision-making engine that manages execution flow, graceful degradation across search layers (LSP, Text, Vector), and failure recovery.
+      - **Directory: requirements/**
+        - **File: requirements.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/requirements/requirements.ex`) - Purpose: Not documented.
+        - **File: search_coordinator_requirements.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/requirements/search_coordinator_requirements.ex`) - Purpose: Not documented.
+      - **File: requirements.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/requirements.ex`) - Purpose: Not documented.
+      - **Directory: telemetry_monitor/**
+        - **File: search_telemetry.ex** (`procoder/search/coordinator_logic_engine/coordinator_core/telemetry_monitor/search_telemetry.ex`) - Purpose: Telemetry instrumentation for the 'Gradient of Precision' search cascade. Tracks search latency, cascade degradation, and failure rates across LSP, TextEngine, and VectorStore layers. Ensures PII/path redaction before dispatching events to the telemetry bus.
+      - **Directory: tests/**
+        - **Directory: integration_verification_suite/**
+  - **File: indexer_worker.ex** (`procoder/search/indexer_worker.ex`) - Purpose: A background worker that triggers codebase indexing on startup.
+- **File: secure_agent_demo.ex** (`procoder/secure_agent_demo.ex`) - Purpose: A real-life demonstration of a valid ProCoder Agent. This module defines a secure agent using the ProCoder DSL macros.
+- **Directory: skills/**
+  - **File: database_discovery_skill.ex** (`procoder/skills/database_discovery_skill.ex`) - Purpose: Skill for semantic auditing of the ProCoder CodeGraph database. Provides high-level tools for querying text chunks and AST relationships.
+  - **File: kernel_patch_skill.ex** (`procoder/skills/kernel_patch_skill.ex`) - Purpose: Skill for self-evolution and hot-code reloading. Allows the agent to apply patches to the ProCoder core engine.
+  - **File: meta_skills.ex** (`procoder/skills/meta_skills.ex`) - Purpose: Skill for dynamic agent creation and runtime compilation. Enables the agent to build new specialists using ProCoder's Macro DSL.
+  - **File: reflexive_audit_skill.ex** (`procoder/skills/reflexive_audit_skill.ex`) - Purpose: Skill for self-reflection and cognitive auditing. Allows the agent to query its own HistoryStackEngine for prior thoughts and states.
+- **Directory: supervision_tree/**
+  - **Directory: .acn/**
+  - **Directory: root_supervisor/**
+    - **Directory: actuator/**
+      - **File: actuator_supervisor.ex** (`procoder/supervision_tree/root_supervisor/actuator/actuator_supervisor.ex`) - Purpose: The Actuator Supervisor manages the lifecycle of the Actuator domain, specifically the CommandRouter (for dispatch) and the PortWrapper (for sandboxed execution).
+    - **Directory: brain/**
+    - **Directory: core/**
+      - **File: core_supervisor.ex** (`procoder/supervision_tree/root_supervisor/core/core_supervisor.ex`) - Purpose: Primary sub-supervisor for the Core domain within the ProCoder system. Orchestrates the foundational components (SessionManager, Registry, HistoryStackEngine) with strict high-availability and fault-tolerance mandates.
+    - **Directory: docs/**
+    - **Directory: monitoring/**
+      - **File: health_check.ex** (`procoder/supervision_tree/root_supervisor/monitoring/health_check.ex`) - Purpose: Autonomic health monitoring service for the ProCoder supervision tree. Provides real-time observability, telemetry, and emergency isolation for critical system domains (Core, Planner, Brain, Actuator).
+    - **Directory: orchestrator/**
+      - **File: root_supervisor.ex** (`procoder/supervision_tree/root_supervisor/orchestrator/root_supervisor.ex`) - Purpose: Not documented.
+    - **Directory: planner/**
+      - **File: planner_supervisor.ex** (`procoder/supervision_tree/root_supervisor/planner/planner_supervisor.ex`) - Purpose: The PlannerSupervisor manages the ProCoder Planner Domain lifecycle. It orchestrates the PersistenceEngine, FailureRemediator, and PlannerGenServer processes, ensuring ordered initialization, fault isolation, and resilient recovery.
+    - **Directory: requirements/**
+      - **File: root_supervisor_requirements.ex** (`procoder/supervision_tree/root_supervisor/requirements/root_supervisor_requirements.ex`) - Purpose: Defines the supervision tree specifications for the ProCoder root supervisor. This module acts as the contract for the system's root supervision tree, defining restart strategies, shutdown timeouts, and domain-specific supervision mandates to ensure system-wide fault isolation and high availability. Adheres to Pillar VII requirements for OTP supervision tree principles.
+    - **File: root_supervisor.ex** (`procoder/supervision_tree/root_supervisor/root_supervisor.ex`) - Purpose: The apex process of the ProCoder OTP supervision tree. It governs the lifecycle, fault isolation, and operational health of the Core, Planner, Brain, and Actuator domains. Adheres to the ProCoder Prime Directive by ensuring stable, autonomous, and fault-tolerant software synthesis.
+    - **Directory: tests/**
+- **File: test_module.ex** (`procoder/test_module.ex`) - Purpose: Not documented.
+- **Directory: tooling/**
+  - **File: cdms_daemon.ex** (`procoder/tooling/cdms_daemon.ex`) - Purpose: A GenServer that ensures the external CDMS process is started and gracefully shut down when ProCoder terminates.
+  - **Directory: lsp/**
+    - **File: manager.ex** (`procoder/tooling/lsp/manager.ex`) - Purpose: The LSP Manager orchestrates multiple language server instances. It acts as a router for incoming JSON-RPC queries from the Search Coordinator.
+    - **File: supervisor.ex** (`procoder/tooling/lsp/supervisor.ex`) - Purpose: A DynamicSupervisor for managing individual Language Server processes. LSPs are started on-demand for specific worktrees.
+  - **File: port_manager.ex** (`procoder/tooling/port_manager.ex`) - Purpose: The PortManager is responsible for the lifecycle and pooling of PortWrapper processes. It ensures that shell command execution is managed, observable, and cleaned up to prevent zombie processes.
+  - **File: supervisor.ex** (`procoder/tooling/supervisor.ex`) - Purpose: Supervises OS ports, LSP servers, and search coordinators.
+- **Directory: ui/**
+  - **Directory: routing_layer/**
+    - **File: command_router.ex** (`procoder/ui/routing_layer/command_router.ex`) - Purpose: The CommandRouter serves as the high-concurrency, fault-tolerant entry point for slash commands. It validates, authorizes via the PolicyEngine, and dispatches commands asynchronously to appropriate backend systems.
+  - **Directory: view_layer/**
+    - **File: diff_viewer.ex** (`procoder/ui/view_layer/diff_viewer.ex`) - Purpose: Specialized rendering engine for interactive edit verification. Uses the Owl library to paint diffs and handle user approval keystrokes.
+    - **File: tui_view.ex** (`procoder/ui/view_layer/tui_view.ex`) - Purpose: The primary interactive interface for ProCoder. Provides a Claude Code-like REPL loop using the Owl library.
+    - **File: view_layer.ex** (`procoder/ui/view_layer/view_layer.ex`) - Purpose: The ViewLayer module serves as the entry point for the UI orchestration layer within the ProCoder system. It handles the definition and rendering dispatching for terminal-based interfaces.

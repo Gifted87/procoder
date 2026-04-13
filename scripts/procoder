@@ -1,0 +1,5 @@
+#!/bin/bash
+# Global alias entry point
+# Add this to your /usr/local/bin or ~/.bashrc
+# export PROCODER_HOME=/home/gifted/procoder_system
+python3 /home/gifted/procoder_system/scripts/procoder_cli.py "$@"

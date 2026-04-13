@@ -1,0 +1,34 @@
+{
+  "prompt_engine_test_suite": {
+    "content": {
+      "acms_node_id": null,
+      "artifact_hash": "96500F1746B392095C85489849201509174640A00192A098B2027581B8246399",
+      "author_id": "agent_node_nonode@nohost",
+      "constituents": null,
+      "cost_metrics": null,
+      "fact_text": "Implemented a comprehensive ExUnit integration and property-based test suite for the PromptEngine subsystem, validating pipeline integrity, security redaction, and error-conditioned tool call correction.",
+      "filename": "prompt_engine_test.exs",
+      "full_path": "/home/gifted/acn/tmp/acn_workspaces/procoder_system/lib/procoder/brain/prompt_logic/engine/tests/prompt_engine_test.exs",
+      "id": "75be6c08-22f2-4839-a2ed-ae16713ceebf",
+      "provenance_data": {
+        "behaviour": "Integration test suite verifying salience ranking, message formatting, JSON correction via property-based testing, and security redaction pipeline. Runs asynchronously within the ExUnit framework.",
+        "interfaces": [
+          "describe/2",
+          "test/3",
+          "property/2",
+          "check/2"
+        ],
+        "node": "nonode@nohost",
+        "schema": {},
+        "utility": "Provides automated verification of PromptEngine logic, ensuring architectural constraints and security requirements are met during system evolution."
+      },
+      "source_code": "defmodule ProCoder.Brain.PromptLogic.Engine.Tests.PromptEngineTest do\n  @moduledoc \"\"\"\n  Comprehensive integration and property-based test suite for the PromptEngine subsystem.\n  Covers salience ranking, message formatting, JSON correction, and pipeline integration.\n  \"\"\"\n\n  use ExUnit.Case, async: true\n  use ExUnitProperties\n\n  alias ProCoder.Brain.PromptEngine.{SalienceRanker, Corrector, Requirements}\n  alias ProCoder.Brain.PromptLogic.Engine.Formatter\n  alias ProCoder.Brain.PromptLogic.Engine.Core.Orchestrator\n  alias ProCoder.Core.Types.Message\n\n  describe \"Salience Ranking Logic\" do\n    test \"ranks and prunes segments based on weighted salience\" do\n      segments = [\n        %{role: :user, content: \"low\", components: [history: 0.1]},\n        %{role: :user, content: \"high\", components: [code_graph: 1.0, task_dag: 1.0]}\n      ]\n\n      ranked = SalienceRanker.rank(segments)\n      assert length(ranked) == 1\n      assert hd(ranked)[:salience_score] > 0.75\n    end\n  end\n\n  describe \"Message Formatting and Redaction\" do\n    test \"formats input into Message struct and redacts PII\" do\n      input = %{role: :user, content: \"API Key: AIza1234567890abcdef1234567890abcdef\"}\n      formatted = Formatter.format(input)\n      \n      assert String.contains?(formatted[\"content\"], \"[REDACTED]\")\n      refute String.contains?(formatted[\"content\"], \"AIza\")\n    end\n  end\n\n  describe \"JSON Correction (Property-Based)\" do\n    property \"corrects or identifies malformed JSON\" do\n      check all json_str <- StreamData.string(:printable, min_length: 5) do\n        schema = %{\"type\" => \"object\"}\n        result = Corrector.correct_tool_call(json_str, schema)\n        \n        case result do\n          {:ok, _} -> assert is_map(_), \"Parsed successfully\"\n          {:retry, feedback} -> assert is_binary(feedback), \"Emitted correction prompt\"\n          {:error, :unrecoverable} -> :ok\n        end\n      end\n    end\n  end\n\n  describe \"Integration Workflow\" do\n    test \"orchestrates full pipeline successfully\" do\n      raw_segments = [\n        %{role: :user, content: \"task details\", components: [task_dag: 1.0]}\n      ]\n\n      {:ok, messages} = Orchestrator.orchestrate(raw_segments)\n      assert is_list(messages)\n      assert %Message{} = hd(messages)\n    end\n\n    test \"handles broken context resiliently\" do\n      broken_segments = [%{content: nil}] # Missing expected structure\n      assert {:error, :orchestration_failed} = Orchestrator.orchestrate(broken_segments)\n    end\n  end\n\n  describe \"Security and Hardening\" do\n    test \"verifies complete redaction of secrets\" do\n      secret = \"sk-live_1234567890abcdef1234567890abcdef\"\n      segments = [%{role: :user, content: \"Secret: #{secret}\", components: [history: 1.0]}]\n      \n      {:ok, messages} = Orchestrator.orchestrate(segments)\n      content = hd(messages).content\n      \n      refute String.contains?(content, secret)\n      assert String.contains?(content, \"[REDACTED]\")\n    end\n  end\nend\n",
+      "timestamp": "2026-03-16T02:24:06.270604Z",
+      "validation_proof": null,
+      "verifier_id": "judge_bot"
+    },
+    "type": "artifact",
+    "hash": "0C8D6269941705B51E3AC532DF69E2985B60EFDBD3092C563AC253A20AA8976B",
+    "timestamp": 1773627846
+  }
+}
