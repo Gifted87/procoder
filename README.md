@@ -1,13 +1,8 @@
-# ProCoder: The Magnum Opus of Autonomous Software Synthesis
+# ProCoder
 
-**Developed by Gift Braimah for the Autonomous Intelligence Community.**
-*Licensed under the MIT License. (c) 2026 ProCoder Systems*
-
-## Chapter 1: The Magnum Opus Manifesto
+## Chapter 1:
 
 ### 1.1 The Vision: Beyond Assisted Programming
-In the legacy era of software development, Artificial Intelligence was relegated to the role of a "Copilot"—a passive suggestor of snippets, a stochastic autocomplete, or a restricted chatbot trapped within the confines of a single file. **ProCoder** marks the termination of that era. 
-
 ProCoder is a **recursive, autonomous software engineer**. It is designed to inhabit, understand, and evolve complex codebases with the same architectural foresight and technical precision as a senior lead engineer. The vision behind ProCoder is the realization of **Autonomous Software Synthesis (ASS)**—a state where the machine is no longer just a participant in the coding process, but the primary driver of architectural evolution, bug resolution, and system-wide refactoring.
 
 ### 1.2 The Core Design Goals
@@ -16,8 +11,8 @@ The architecture of ProCoder is anchored by four fundamental pillars that define
 #### I. High-Fidelity Architectural Precision
 ProCoder does not operate on text alone. Through its **Cognitive Digital Modelling System (CDMS)**, it constructs a rich, multi-dimensional graph of the entire software ecosystem. It understands the "why" behind a module, the hidden dependencies between services, and the cascading impact of a single logic change. Every action ProCoder takes is informed by this global context, ensuring that its interventions are structurally sound and architecturally coherent.
 
-#### II. Recursive Self-Evolution
-A static agent is a dead agent. ProCoder is built to self-improve. Using its **Mastery SDK and Macro DSL**, ProCoder can synthesize new "Specialist" agents at runtime, forge custom skills to handle novel technologies, and audit its own cognitive history to identify and break out of reasoning loops. The system is designed to become more intelligent and efficient with every session it completes.
+#### II. Recursive Self-Evolution (Experimental)
+A static agent is a dead agent. ProCoder is built to self-improve. Using its **Mastery SDK and Macro DSL**, ProCoder can synthesize new "Specialist" agents at runtime, forge custom skills to handle novel technologies, and audit its own cognitive history to identify and break out of reasoning loops. The system is designed to become more intelligent and efficient with every session it completes. (Pls note that this feature is still under development).
 
 #### III. Absolute Transactional Safety
 Autonomous agency requires hardened guardrails. ProCoder implements a **Multi-Layered Security Lattice**. From the **Policy Engine** that evaluates risk heuristics at the byte-level to the **Git-backed Worktree isolation** that ensures every modification is transactional and revertible, ProCoder is built for production environments where "breaking things" is not an option.
@@ -26,7 +21,7 @@ Autonomous agency requires hardened guardrails. ProCoder implements a **Multi-La
 Cognition in ProCoder is a resource-weighted operation. The system employs **Salience Ranking** and **Salience-Weighted History Management** to ensure that the agent's limited context window is always populated with the highest-relevance information. We replace raw "memory" with "intelligence," filtering out the noise of dependency graphs and build artifacts to focus on the core logic that matters.
 
 ### 1.3 The "ProCoder" Identity
-When you activate a ProCoder instance, you are not spawning an LLM; you are commissioning a persona. The ProCoder Identity is defined by:
+When you activate a ProCoder instance, you are commissioning a persona. The ProCoder Identity is defined by:
 - **Radical Transparency**: The agent documents its "Chain of Thought" reasoning before every action.
 - **Structural Integrity**: It prioritizes the health of the codebase over the speed of the fix.
 - **Reflective Verification**: It never "presumes" success; it follows a strict protocol of Proof-of-Work verification before submitting its findings.
@@ -34,7 +29,6 @@ When you activate a ProCoder instance, you are not spawning an LLM; you are comm
 ProCoder is the bridge between the human intent and the synthesized reality of perfectly engineered software.
 
 ---
-*Progress: Chapter 1 Completed. Proceeding to Chapter 2: Architectural Hierarchy & Domain Genesis.*
 
 ## Chapter 2: Architectural Hierarchy & Domain Genesis
 
@@ -246,6 +240,7 @@ ProCoder's TUI is built on the **Owl** library, providing a rich, colorized, and
 - `/list`: Displays the session archive with semantic titles and timestamps.
 - `/reload <session_id>`: Re-hydrates a past session from cold storage, restoring the full history and worktree.
 - `/audit`: Invokes the `ReflexiveAuditSkill` to review the agent's recent reasoning chain.
+NOTE that although the most fundamental commands are fully functional some are still being developed and may not behave exactly as expected.
 
 ### 6.3 The Local Server API: Beyond the CLI
 While the TUI is the primary interface for developers, the `LocalServer.Endpoint` allows ProCoder to act as a backend for the broader engineering ecosystem.
@@ -325,6 +320,8 @@ Before a synthesized skill is made available to an agent, it is executed in a "D
 
 #### Stage 3: Rate Migration
 The validator ensures that custom skills adhere to the system's global rate limits for LLM calls and shell executions, preventing "Infinite Feedback Loops" in synthesized logic.
+
+**It is important to note that while the DSL itself is fully functional and the user can write and run custom agents with it, the capability for the procoder to forge and run agents autonomously during task execution is still under development**
 
 ### 7.3 The Forging Lifecycle: From Thought to Execution
 ProCoder follows a strict **Forge-to-Spawn** lifecycle for self-extension:
@@ -608,7 +605,7 @@ By fine-tuning these parameters, you can transform ProCoder from a helpful assis
 
 As an industrial-grade autonomous system, ProCoder utilizes a specialized technical lexicon. This appendix provides definitions for core concepts and a comprehensive reference for common error codes and their resolution strategies.
 
-### 12.1 ProCoder Lexicon (The A-Z of Autonomous Synthesis)
+### 12.1 ProCoder Lexicon
 
 - **AgentFSM**: The core Finite State Machine that governs the transition of an agent through its lifecycle phases (Discovery, Planning, Synthesis, Verification).
 - **Bubblewrap Isolation**: A security technique (inspired by the Linux utility) used by the Actuator to jail shell commands within the project's source root.
@@ -657,7 +654,7 @@ ProCoder is designed for high-performance autonomous synthesis. Follow the insta
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/procoder-system/procoder
+   git clone https://github.com/gifted87/procoder
    cd procoder
    ```
 
@@ -747,7 +744,5 @@ ProCoder provides a set of slash commands for human-in-the-loop (HITL) control:
 
 ## License
 
-ProCoder is released under the **MIT License**. See [LICENSE](LICENSE) for the full text.
+*Proprietary Infrastructure for **The Genesis Machine**. Developed by Gift Braimah.*
 
----
-*ProCoder © 2026. The Sovereign Engineer's Choice.*
