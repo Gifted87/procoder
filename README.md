@@ -373,9 +373,6 @@ ProCoder maintains a globally synchronized **Forbidden Token List**. This list i
 - **Sensitive Path Patterns**: `/etc/passwd`, `~/.ssh/id_rsa`, `config/secrets.exs`.
 - **Credential Signatures**: Patterns matching API keys, database connection strings, and JWT signatures (e.g., `AIzaSy...`).
 
-> [!CAUTION]
-> **Zero-Hardcode Policy**: ProCoder's own codebase strictly adheres to this policy. No API keys or secrets are hardcoded in the source or configuration files. Verification is performed at compile-time via the `DSLValidator`.
-
 If any part of the agent's proposed action matches these patterns, the **FTD Subsystem** triggers an immediate `:halt` signal, freezing the session for forensic review.
 
 ### 8.4 Sandbox Isolation & The PortWrapper
