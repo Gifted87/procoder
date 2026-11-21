@@ -146,9 +146,30 @@ defmodule ProCoder.Core.OrchestrationLayer.SessionManagerImpl.SupervisorCore.Ses
   end
 
   defp start_agent_process(session_id, worktree, goal, source_root, opts) do
+    module = Keyword.get(opts, :module, AgentFSM)
+    specialist_module = Keyword.get(opts, :specialist_module)
+    actual_specialist = specialist_module || (if module != AgentFSM, do: module, else: nil)
+
+    agent_opts = [
+      session_id: session_id,
+      worktree_root: worktree,
+      goal: goal,
+      source_root: source_root,
+      specialist_module: actual_specialist
+    ] ++ opts
+
+    start_mfa =
+      cond do
+        is_atom(module) and module != AgentFSM and Code.ensure_loaded?(module) and function_exported?(module, :start_link, 1) ->
+          {module, :start_link, [agent_opts]}
+
+        true ->
+          {AgentFSM, :start_link, [agent_opts]}
+      end
+
     child_spec = %{
       id: {:agent_fsm, session_id},
-      start: {AgentFSM, :start_link, [[session_id: session_id, worktree_root: worktree, goal: goal, source_root: source_root] ++ opts]},
+      start: start_mfa,
       restart: :transient
     }
 

@@ -15,6 +15,9 @@ defmodule ProCoder.Application do
     # 1. Runtime Configuration Injection (Fail-Fast)
     :ok = ProCoder.Config.RuntimeInitializer.init_runtime_config!()
 
+    # Keep terminal interaction readable. Developers can opt into verbose logs.
+    Logger.configure(level: configured_log_level())
+
     # 2. Telemetry Registration
     setup_telemetry()
 
@@ -22,6 +25,9 @@ defmodule ProCoder.Application do
     children = [
       # Global Process Registry
       {ProCoder.Registry, []},
+
+      # Claude Code / Codex External Skills Registry (Progressive Disclosure)
+      {ProCoder.Skills.ExternalSkillRegistry, []},
 
       # Worktree Management (Isolated Sandboxes)
       {ProCoder.Core.OrchestrationLayer.SessionManagerImpl.WorktreeEngine.WorktreeManager, []},
@@ -79,5 +85,21 @@ defmodule ProCoder.Application do
     # Attach telemetry handlers for global performance monitoring
     # :telemetry.attach("procoder-logger", [:procoder, :stop], &ProCoder.Telemetry.handle_event/4, nil)
     :ok
+  end
+
+  defp configured_log_level do
+    level =
+      case System.get_env("PROCODER_LOG_LEVEL", "warning") |> String.downcase() do
+        "debug" -> :debug
+        "info" -> :info
+        "notice" -> :notice
+        "warning" -> :warning
+        "error" -> :error
+        _ -> :warning
+      end
+
+    Logger.configure(level: level)
+    Logger.configure_backend(:console, level: level)
+    level
   end
 end

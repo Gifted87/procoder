@@ -63,7 +63,7 @@ defmodule ProCoder.Search.CodeGraphEngine do
   def index_codebase do
     Task.start(fn ->
       ensure_schema!()
-      source_root = Application.get_env(:procoder, ProCoder.SessionManager)[:source_root]
+      source_root = System.get_env("PROCODER_SOURCE_ROOT") || Application.get_env(:procoder, ProCoder.SessionManager)[:source_root]
       
       Logger.info("IndexerWorker: Starting recursive codebase crawl at #{source_root}...")
       

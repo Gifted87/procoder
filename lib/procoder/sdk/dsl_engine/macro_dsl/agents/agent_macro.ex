@@ -29,16 +29,73 @@ defmodule ProCoder.SDK.MacroDSL.Agents.AgentMacro do
         # Inject gen_statem boilerplate
         unquote(LifecycleUtils.generate_boilerplate())
         
+        # Setup attribute tracking for skills and persona
+        Module.register_attribute(__MODULE__, :agent_skills, accumulate: true)
+        Module.register_attribute(__MODULE__, :persona, accumulate: false)
+        Module.put_attribute(__MODULE__, :persona, "You are a specialized autonomous coding agent.")
+
         # Import defskill into the agent's scope
         import ProCoder.SDK.MacroDSL.Agents.AgentMacro, only: [defskill: 2, persona: 1]
 
         # 2. Macro expansion of agent behaviors
         unquote(block)
 
-        # 3. Telemetry registration
+        # 3. Agent Metadata & Skill Introspection
+        def persona, do: @persona
+
+        def __skills__, do: Enum.reverse(@agent_skills)
+
+        def __tool_declarations__ do
+          Enum.map(__skills__(), fn skill_atom ->
+            %{
+              name: Atom.to_string(skill_atom),
+              description: "Specialist skill '#{skill_atom}' provided by #{inspect(unquote(name))}. Pass arguments as a map.",
+              parameters: %{
+                type: "OBJECT",
+                properties: %{
+                  path: %{type: "STRING", description: "Target path or resource"},
+                  query: %{type: "STRING", description: "Search query or concept"},
+                  cmd: %{type: "STRING", description: "Shell command if applicable"},
+                  args: %{type: "OBJECT", description: "Skill arguments map"}
+                }
+              }
+            }
+          end)
+        end
+
+        def execute_skill(skill_name, args) when is_binary(skill_name) do
+          case Enum.find(__skills__(), &(Atom.to_string(&1) == skill_name)) do
+            nil -> {:error, "Skill '#{skill_name}' not found on agent #{inspect(__MODULE__)}"}
+            atom_name -> execute_skill(atom_name, args)
+          end
+        end
+
+        def execute_skill(skill_atom, args) when is_atom(skill_atom) do
+          if skill_atom in __skills__() do
+            apply(__MODULE__, skill_atom, [args])
+          else
+            {:error, "Skill '#{skill_atom}' not found on agent #{inspect(__MODULE__)}"}
+          end
+        end
+
+        # 4. FSM / ReAct Loop Process Bridge
+        def start_link(opts) do
+          fsm_opts = Keyword.put(opts, :specialist_module, __MODULE__)
+          ProCoder.Core.AgentFSM.start_link(fsm_opts)
+        end
+
+        def child_spec(opts) do
+          %{
+            id: {:specialist_agent, Keyword.get(opts, :session_id, __MODULE__)},
+            start: {__MODULE__, :start_link, [opts]},
+            restart: :transient
+          }
+        end
+
+        # 5. Telemetry registration
         @after_compile {DSLValidator, :emit_validation_telemetry}
 
-        # 4. Standard gen_statem events
+        # 6. Standard gen_statem events
         @impl true
         def handle_event({:call, from}, {:rehydrate_state, state}, _state_name, data) do
           {:next_state, :idle, Map.merge(data, state), [{:reply, from, :ok}]}
@@ -71,6 +128,8 @@ defmodule ProCoder.SDK.MacroDSL.Agents.AgentMacro do
     end
 
     res = quote do
+      @agent_skills unquote(name)
+
       def unquote(name)(var!(args)) do
         # Suppress unused warning for 'args'
         _ = var!(args)
@@ -108,7 +167,6 @@ defmodule ProCoder.SDK.MacroDSL.Agents.AgentMacro do
   defmacro persona(text) do
     quote do
       Module.put_attribute(__MODULE__, :persona, unquote(text))
-      def persona, do: @persona
     end
   end
 end

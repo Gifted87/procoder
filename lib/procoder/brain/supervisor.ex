@@ -27,6 +27,9 @@ defmodule ProCoder.Brain.Supervisor do
       # LLM Client Engine handles external network interactions.
       {ProCoder.Brain.Client.Engine, []},
 
+      # KeyRotator manages sequential API key rotation.
+      {ProCoder.Brain.Client.KeyRotator, []},
+
       # Bumblebee Embedding Generation Worker
       {ProCoder.Brain.ClientEngine.EmbeddingWorker, []}
     ]

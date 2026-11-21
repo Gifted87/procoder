@@ -4,41 +4,88 @@ defmodule ProCoder.Skills.AgentForgeSkill do
   Enables the agent to build new specialists using ProCoder's Macro DSL.
   """
   require Logger
+  alias ProCoder.Core.AgentLogic.ToolDefinitions
 
   @doc """
   Generates and compiles a new agent module at runtime.
   """
   def create_specialist(args) do
-    name = args["name"]
-    goal_type = args["goal_type"]
-    tools = Map.get(args, "tools", ["read_file", "write_file"])
+    raw_name = args["name"] || "Specialist_#{:erlang.unique_integer([:positive])}"
+    clean_name = Macro.camelize(to_string(raw_name))
+    goal_type = args["goal_type"] || "specialized engineering tasks"
     custom_code = args["dsl_code"]
 
-    module_name = "ProCoder.Agents.Specialist.#{name}"
-    
-    code = custom_code || """
-    defmodule #{module_name} do
-      import ProCoder.SDK.MacroDSL.Agents.AgentMacro
-      
-      defagent Specialist do
-        persona \"\"\"
-        You are a specialized ProCoder agent focused on #{goal_type}.
-        You have access to the following tools: #{Enum.join(tools, ", ")}.
-        \"\"\"
-      end
-    end
-    """
+    code =
+      cond do
+        custom_code && String.trim(custom_code) != "" ->
+          cond do
+            String.contains?(custom_code, "defmodule") ->
+              custom_code
 
-    # For safety in this environment, we'll write it to a file and then compile
-    file_path = "/tmp/#{name}_agent.ex"
+            String.contains?(custom_code, "defagent") ->
+              """
+              use ProCoder.SDK.MacroDSL.Agents.AgentMacro
+
+              #{custom_code}
+              """
+
+            true ->
+              """
+              use ProCoder.SDK.MacroDSL.Agents.AgentMacro
+
+              defagent #{clean_name} do
+                persona \"\"\"
+                You are a specialized ProCoder agent focused on #{goal_type}.
+                \"\"\"
+
+                #{custom_code}
+              end
+              """
+          end
+
+        true ->
+          tools = Map.get(args, "tools", ["read_file", "write_file"])
+          """
+          use ProCoder.SDK.MacroDSL.Agents.AgentMacro
+
+          defagent #{clean_name} do
+            persona \"\"\"
+            You are a specialized ProCoder agent focused on #{goal_type}.
+            You have access to standard tools: #{Enum.join(tools, ", ")}.
+            \"\"\"
+          end
+          """
+      end
+
+    file_path = "/tmp/#{clean_name}_agent.ex"
     File.write!(file_path, code)
-    
+
     try do
-      Code.compile_file(file_path)
-      Logger.info("Forge: Compiled new agent module: #{module_name}")
-      {:ok, "Specialist agent '#{name}' has been forged and compiled. Module: #{module_name}"}
+      compiled_modules = Code.compile_file(file_path)
+      target_mod = 
+        case compiled_modules do
+          [{mod, _} | _] -> mod
+          _ -> Module.concat([ProCoder.Agents.Specialist, clean_name])
+        end
+
+      # Register custom skills with ToolDefinitions
+      ToolDefinitions.register_module_skills(target_mod)
+
+      # Register specialist in Registry
+      try do
+        Registry.register(ProCoder.Registry, "specialist_#{clean_name}", target_mod)
+      rescue
+        _ -> :ok
+      end
+
+      skills = if Code.ensure_loaded?(target_mod) and function_exported?(target_mod, :__skills__, 0), do: target_mod.__skills__(), else: []
+
+      Logger.info("Forge: Compiled and registered new agent module: #{inspect(target_mod)}")
+      {:ok, "Specialist agent '#{clean_name}' has been forged and compiled. Module: #{inspect(target_mod)}. Exported skills: #{inspect(skills)}. Ready to run in ReAct loop."}
     rescue
-      e -> {:error, "Forge failed: #{inspect(e)}"}
+      e ->
+        Logger.error("Forge failed: #{inspect(e)}")
+        {:error, "Forge failed: #{inspect(e)}"}
     end
   end
 
@@ -77,17 +124,60 @@ defmodule ProCoder.Skills.SwarmOrchestrationSkill do
   Spawns a specialized sub-agent to handle a delegated goal.
   """
   def spawn_worker(args) do
-    session_id = args["session_id"]
+    session_id = args["session_id"] || "worker"
     sub_session_id = "#{session_id}_worker_#{:erlang.unique_integer([:positive])}"
-    goal = args["goal"]
-    # We default to the standard AgentFSM unless a specialist type is provided
-    _type = Map.get(args, "module", "ProCoder.Core.AgentFSM")
+    goal = args["goal"] || "Execute assigned sub-task"
 
-    case SessionManager.spawn_agent(sub_session_id, goal) do
+    mod_param = args["module"]
+    module = resolve_agent_module(mod_param)
+
+    opts = [
+      module: module,
+      specialist_module: (if module != ProCoder.Core.AgentFSM, do: module, else: nil)
+    ]
+
+    case SessionManager.spawn_agent(sub_session_id, goal, opts) do
       {:ok, pid} ->
-        {:ok, "Worker spawned successfully [ID: #{sub_session_id}, PID: #{inspect(pid)}]. Tasking initiated."}
+        {:ok, "Worker spawned successfully [ID: #{sub_session_id}, PID: #{inspect(pid)}, Module: #{inspect(module)}]. ReAct FSM loop active."}
       {:error, reason} ->
         {:error, "Failed to spawn worker: #{inspect(reason)}"}
+    end
+  end
+
+  defp resolve_agent_module(nil), do: ProCoder.Core.AgentFSM
+  defp resolve_agent_module(mod) when is_atom(mod), do: mod
+  defp resolve_agent_module(mod_str) when is_binary(mod_str) do
+    trimmed = String.trim(mod_str)
+    cond do
+      trimmed == "" or trimmed == "ProCoder.Core.AgentFSM" ->
+        ProCoder.Core.AgentFSM
+
+      true ->
+        # 1. Check Registry for specialist name
+        case Registry.lookup(ProCoder.Registry, "specialist_#{trimmed}") do
+          [{_pid, registered_mod}] when is_atom(registered_mod) ->
+            registered_mod
+
+          _ ->
+            # 2. Try converting string to module atom
+            try do
+              parts = String.split(trimmed, ".") |> Enum.map(&String.to_atom/1)
+              mod_alias = Module.concat(parts)
+              if Code.ensure_loaded?(mod_alias) do
+                mod_alias
+              else
+                # Try prefixing with ProCoder.Agents.Specialist.
+                specialist_alias = Module.concat([ProCoder.Agents.Specialist, String.to_atom(trimmed)])
+                if Code.ensure_loaded?(specialist_alias) do
+                  specialist_alias
+                else
+                  mod_alias
+                end
+              end
+            rescue
+              _ -> ProCoder.Core.AgentFSM
+            end
+        end
     end
   end
 end

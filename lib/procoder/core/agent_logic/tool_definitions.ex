@@ -11,8 +11,21 @@ defmodule ProCoder.Core.AgentLogic.ToolDefinitions do
     ToolDefinitions.all_tools()   -> list of function declaration maps
   """
 
-  @doc "Returns the full list of function declarations for the Gemini tools API."
+  @custom_tools_table :procoder_custom_tools
+
+  @doc "Returns the full list of function declarations for the Gemini/OpenAI tools API, including custom specialist skills."
   def all_tools do
+    base = base_tools()
+    custom = list_custom_tools()
+    
+    (base ++ custom)
+    |> Enum.uniq_by(fn tool ->
+      to_string(tool[:name] || tool["name"])
+    end)
+  end
+
+  @doc "Returns the static base tool declarations."
+  def base_tools do
     [
       read_file(),
       write_file(),
@@ -36,8 +49,66 @@ defmodule ProCoder.Core.AgentLogic.ToolDefinitions do
       submit_for_validation(),
       validator_approve(),
       validator_reject(),
-      google_search()
+      google_search(),
+      load_skill(),
+      install_skill(),
+      run_skill_script(),
+      read_skill_resource()
     ]
+  end
+
+  defp ensure_custom_tools_table do
+    case :ets.info(@custom_tools_table) do
+      :undefined ->
+        try do
+          :ets.new(@custom_tools_table, [:set, :public, :named_table, read_concurrency: true])
+        rescue
+          _ -> @custom_tools_table
+        end
+      _ ->
+        @custom_tools_table
+    end
+  end
+
+  @doc "Registers a custom tool declaration and its handler module."
+  def register_custom_tool(tool_decl, handler_module) when is_map(tool_decl) do
+    ensure_custom_tools_table()
+    name = to_string(tool_decl[:name] || tool_decl["name"])
+    :ets.insert(@custom_tools_table, {name, tool_decl, handler_module})
+    :ok
+  end
+
+  @doc "Registers all skills exported by an agent module."
+  def register_module_skills(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :__tool_declarations__, 0) do
+      declarations = module.__tool_declarations__()
+      Enum.each(declarations, fn decl ->
+        register_custom_tool(decl, module)
+      end)
+      :ok
+    else
+      :error
+    end
+  end
+
+  @doc "Finds the handler module for a custom skill name."
+  def get_skill_handler(skill_name) when is_binary(skill_name) do
+    ensure_custom_tools_table()
+    case :ets.lookup(@custom_tools_table, skill_name) do
+      [{^skill_name, _decl, handler_module}] -> handler_module
+      _ -> nil
+    end
+  end
+
+  def get_skill_handler(skill_atom) when is_atom(skill_atom) do
+    get_skill_handler(Atom.to_string(skill_atom))
+  end
+
+  @doc "Lists all registered custom tools."
+  def list_custom_tools do
+    ensure_custom_tools_table()
+    :ets.tab2list(@custom_tools_table)
+    |> Enum.map(fn {_name, decl, _handler} -> decl end)
   end
 
   # ---------------------------------------------------------------------------
@@ -700,4 +771,107 @@ defmodule ProCoder.Core.AgentLogic.ToolDefinitions do
       }
     }
   end
+
+  defp load_skill do
+    %{
+      name: "load_skill",
+      description: """
+      Phase 2 Progressive Disclosure: Activates and reads the full instructions, guidelines,
+      and reference index of a discovered skill (e.g. from skills manifest or user directive).
+      Call this when a task matches a skill's description or when instructed by the user.
+      """,
+      parameters: %{
+        type: "OBJECT",
+        properties: %{
+          skill_name: %{
+            type: "STRING",
+            description: "The exact name of the skill to activate and read (e.g. 'biquote-api', 'circle-agent-stack')."
+          }
+        },
+        required: ["skill_name"]
+      }
+    }
+  end
+
+  defp install_skill do
+    %{
+      name: "install_skill",
+      description: """
+      Installs a Claude/Codex skill from a Git repository or public HTTP URL into project
+      or global skills directory.
+      """,
+      parameters: %{
+        type: "OBJECT",
+        properties: %{
+          source: %{
+            type: "STRING",
+            description: "Git repository URL (e.g. 'https://github.com/org/repo.git') or public URL/local folder path to install from."
+          },
+          scope: %{
+            type: "STRING",
+            description: "Installation scope: 'project' (installs in workspace .claude/skills) or 'global' (installs in ~/.claude/skills). Defaults to 'project'."
+          },
+          name: %{
+            type: "STRING",
+            description: "Optional custom name for the skill directory."
+          }
+        },
+        required: ["source"]
+      }
+    }
+  end
+
+  defp run_skill_script do
+    %{
+      name: "run_skill_script",
+      description: """
+      Phase 3 Progressive Disclosure: Executes a bundled executable script inside a skill's scripts/
+      directory under system security and policy engine controls.
+      """,
+      parameters: %{
+        type: "OBJECT",
+        properties: %{
+          skill_name: %{
+            type: "STRING",
+            description: "Name of the skill owning the script."
+          },
+          script_name: %{
+            type: "STRING",
+            description: "Relative path or filename of the executable script inside the skill's scripts/ directory."
+          },
+          args: %{
+            type: "ARRAY",
+            items: %{type: "STRING"},
+            description: "List of string arguments to pass to the script."
+          }
+        },
+        required: ["skill_name", "script_name"]
+      }
+    }
+  end
+
+  defp read_skill_resource do
+    %{
+      name: "read_skill_resource",
+      description: """
+      Phase 3 Progressive Disclosure: Reads an on-demand reference document, template, or asset
+      located in a skill's references/ or resources/ directory without loading unnecessary bulk context upfront.
+      """,
+      parameters: %{
+        type: "OBJECT",
+        properties: %{
+          skill_name: %{
+            type: "STRING",
+            description: "Name of the skill."
+          },
+          resource_path: %{
+            type: "STRING",
+            description: "Relative path inside the skill directory (e.g. 'references/api_reference.md', 'examples/quickstart.ex')."
+          }
+        },
+        required: ["skill_name", "resource_path"]
+      }
+    }
+  end
 end
+

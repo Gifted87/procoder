@@ -12,6 +12,7 @@ defmodule ProCoder.Brain.Client.Adapters.ProviderAdapter do
   alias ProCoder.Brain.Client.HTTPPool.Manager
   alias ProCoder.Brain.Client.SSEParser
   alias ProCoder.Brain.PromptLogic.Engine.Formatter, as: Validator
+  alias ProCoder.Brain.Client.KeyRotator
 
   @impl true
   def chat(context, opts) do
@@ -89,10 +90,11 @@ defmodule ProCoder.Brain.Client.Adapters.ProviderAdapter do
 
   defp format_payload(messages) do
     %{
-      model: "procoder-default",
+      model: System.get_env("PROCODER_LLM_MODEL", "qwen3.8-27b"),
       messages: Enum.map(messages, fn m ->
         %{role: m.role, content: m.content}
-      end)
+      end),
+      chat_template_kwargs: %{enable_thinking: System.get_env("PROCODER_LLM_THINKING", "false") == "true"}
     }
   end
 
@@ -114,6 +116,26 @@ defmodule ProCoder.Brain.Client.Adapters.ProviderAdapter do
   defp valid_message?(%Message{role: r}) when r in [:system, :user, :assistant], do: true
   defp valid_message?(_), do: false
 
-  defp get_api_key, do: System.get_env("PROCODER_LLM_API_KEY", "dev_mock_token")
-  defp get_base_url, do: System.get_env("PROCODER_LLM_URL", "http://localhost:8080")
+  defp get_api_key do
+    case KeyRotator.get_next_key() do
+      nil ->
+        System.get_env("PROCODER_LLM_API_KEY") || read_api_key_file() || "dev_mock_token"
+      key -> key
+    end
+  end
+
+  defp read_api_key_file do
+    path = System.get_env("PROCODER_LLM_API_KEY_FILE", "/root/vllm-api-key")
+
+    case File.read(path) do
+      {:ok, key} ->
+        case String.trim(key) do
+          "" -> nil
+          trimmed -> trimmed
+        end
+      {:error, _} -> nil
+    end
+  end
+
+  defp get_base_url, do: System.get_env("PROCODER_LLM_URL", "http://129.212.187.75:8000/v1")
 end

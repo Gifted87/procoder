@@ -1,7 +1,7 @@
 defmodule ProCoder.UI.ViewLayer.TuiView do
   @moduledoc """
   The primary interactive interface for ProCoder.
-  Provides a Claude Code-like REPL loop using the Owl library.
+  Provides a terminal chat loop with agent progress and command feedback.
   """
 
   # Ensure the module is properly named according to the supervision tree
@@ -13,7 +13,7 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
   alias ProCoder.UI.RoutingLayer.CommandRouter
   alias ProCoder.Core.OrchestrationLayer.SessionManagerImpl.SupervisorCore.SessionManager
 
-  @prompt "> "
+  @prompt "› "
 
   # --- API ---
 
@@ -31,12 +31,12 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
     # Start the REPL loop in a separate task so we don't block the GenServer
     # We pass self() so the REPL can send messages back to the GenServer if needed
     parent = self()
-    Task.start(fn -> 
+    Task.start_link(fn ->
       Process.sleep(500)
-      repl_loop(parent) 
+      repl_loop(parent)
     end)
-    
-    {:ok, %{session_id: session_id, active_agent_pid: nil}}
+
+    {:ok, %{session_id: session_id, active_agent_pid: nil, pending_goal: nil}}
   end
 
   @impl true
@@ -44,15 +44,86 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
     {:reply, state.active_agent_pid, state}
   end
 
+  def handle_call({:submit_goal, goal}, _from, state) do
+    cond do
+      state.pending_goal != nil ->
+        {:reply, :busy, state}
+
+      is_pid(state.active_agent_pid) and Process.alive?(state.active_agent_pid) ->
+        GenServer.cast(state.active_agent_pid, {:plan, goal})
+        {:reply, :continued, state}
+
+      true ->
+        parent = self()
+        session_id = state.session_id
+
+        case Task.start(fn ->
+               result =
+                 try do
+                   SessionManager.spawn_agent(session_id, goal, force_fresh: false, ui_pid: parent)
+                 rescue
+                   error -> {:error, Exception.message(error)}
+                 catch
+                   :exit, reason -> {:error, reason}
+                 end
+
+               send(parent, {:agent_spawned, session_id, goal, result})
+             end) do
+          {:ok, _task_pid} -> {:reply, :starting, %{state | pending_goal: goal}}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
   @impl true
   def handle_cast({:set_active_agent, pid}, state) do
     {:noreply, %{state | active_agent_pid: pid}}
   end
 
-  @impl true
   def handle_cast({:set_session, session_id}, state) do
     {:noreply, %{state | session_id: session_id}}
   end
+
+  @impl true
+  def handle_info({:agent_spawned, session_id, goal, {:ok, pid}}, state)
+      when session_id == state.session_id and goal == state.pending_goal do
+    Owl.IO.puts([
+      Owl.Data.tag("\n● Agent ready", :green),
+      "  ",
+      Owl.Data.tag("Working on your request…", :cyan),
+      "\n"
+    ])
+
+    {:noreply, %{state | active_agent_pid: pid, pending_goal: nil}}
+  end
+
+  def handle_info({:agent_spawned, session_id, goal, {:error, reason}}, state)
+      when session_id == state.session_id and goal == state.pending_goal do
+    Owl.IO.puts(Owl.Data.tag("\nCould not start agent: #{inspect(reason)}\n", :red))
+    {:noreply, %{state | pending_goal: nil}}
+  end
+
+  def handle_info({:agent_event, session_id, :thinking}, %{session_id: session_id} = state) do
+    Owl.IO.puts(Owl.Data.tag("\n◌ Thinking…", :cyan))
+    {:noreply, state}
+  end
+
+  def handle_info({:agent_event, session_id, {:tools, names}}, %{session_id: session_id} = state) do
+    Owl.IO.puts(Owl.Data.tag("\n↳ Using #{Enum.join(names, ", ")}", :yellow))
+    {:noreply, state}
+  end
+
+  def handle_info({:agent_event, session_id, {:tools_done, names}}, %{session_id: session_id} = state) do
+    Owl.IO.puts(Owl.Data.tag("✓ Finished #{Enum.join(names, ", ")}", :green))
+    {:noreply, state}
+  end
+
+  def handle_info({:agent_event, session_id, {:llm_error, reason}}, %{session_id: session_id} = state) do
+    Owl.IO.puts(Owl.Data.tag("\nModel request failed: #{inspect(reason)}", :red))
+    {:noreply, state}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   # --- Internal REPL Loop ---
 
@@ -61,20 +132,22 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
     IO.write("\e[?2004h")
 
     Owl.IO.puts([
-      Owl.Data.tag("\nProCoder v2.0", :bright),
-      " - The Elixir/OTP Agentic Harness\n",
-      "Type ", Owl.Data.tag("/help", :cyan), " for commands, or just state your goal.\n"
+      Owl.Data.tag("\n╭─ ProCoder", :bright),
+      "  ",
+      Owl.Data.tag("qwen3.8-27b", :cyan),
+      "\n│ Describe a task, or use /help for commands.\n╰────────────────────────────────────────\n"
     ])
 
     loop(parent)
   end
 
   defp loop(parent) do
-    input = try do
-      Owl.IO.input(label: @prompt, optional: true)
-    rescue
-      _ -> nil
-    end
+    input =
+      case IO.gets(@prompt) do
+        :eof -> :eof
+        nil -> :eof
+        line -> line |> String.trim_trailing("\n") |> String.trim_trailing("\r")
+      end
 
     input = case input do
       "\e[200~" <> _ = start -> collect_bracketed_paste(start)
@@ -82,6 +155,9 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
     end
 
     case input do
+      :eof ->
+        Logger.info("[TUI] Standard input closed; interactive prompt stopped.")
+
       nil -> 
         loop(parent)
 
@@ -96,6 +172,14 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
         GenServer.cast(parent, {:set_active_agent, nil})
         Owl.IO.puts(Owl.Data.tag("\nNew session started: #{session_id}", :bright))
         loop(parent)
+
+      "/quit" ->
+        IO.write("\e[?2004l")
+        System.stop()
+
+      "/exit" ->
+        IO.write("\e[?2004l")
+        System.stop()
 
       "/" <> command_string ->
         handle_slash_command(command_string, parent)
@@ -120,6 +204,15 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
         # Improved args parsing for specific commands
         dispatch_args = case {cmd_atom, args} do
           {:reload, [id]} -> %{id: id}
+          {:skills, [sub | _]} -> %{subcommand: sub}
+          {:skills, []} -> %{subcommand: "list"}
+          {:skill, [action, target | rest]} ->
+            scope = List.first(rest) || "project"
+            %{action: action, target: target, scope: scope, path: target}
+          {:skill, [action]} ->
+            %{action: action}
+          {:skill, []} ->
+            %{action: "list"}
           {_, [path | rest]} -> %{path: path, goal: Enum.join(rest, " ")}
           {_, []} -> %{}
         end
@@ -149,6 +242,38 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
               end)
               Owl.IO.puts("\nUse " <> Owl.Data.tag("/reload <id>", :cyan) <> " to restore a conversation.\n")
             end
+
+          # Handle /skills list result
+          {:ok, {:skills_list, skills}} ->
+            Owl.IO.puts("\n" <> Owl.Data.tag("=== DISCOVERED CLAUDE / CODEX SKILLS ===", :bright))
+            if skills == [] do
+              Owl.IO.puts("  (No skills found in ~/.gemini/config/skills, ~/.claude/skills, or .claude/skills)")
+            else
+              Enum.each(skills, fn skill ->
+                scope_tag = if skill.scope == :project, do: Owl.Data.tag("[project]", :green), else: Owl.Data.tag("[global]", :cyan)
+                Owl.IO.puts("  #{scope_tag} #{Owl.Data.tag(skill.name, :bright)} - #{skill.description}")
+                if skill.allowed_tools != [], do: Owl.IO.puts("      Tools: #{Enum.join(skill.allowed_tools, ", ")}")
+              end)
+            end
+            Owl.IO.puts("\nCommands: " <> Owl.Data.tag("/skill read <name>", :yellow) <> " | " <> Owl.Data.tag("/skill install <url>", :yellow) <> " | " <> Owl.Data.tag("/skill reload", :yellow) <> "\n")
+
+          # Handle /skill read / tell agent
+          {:ok, {:skill_read_directed, skill_name}} ->
+            Owl.IO.puts(Owl.Data.tag("✓ Directed active agent to activate and read skill '#{skill_name}'.", :green))
+
+          # Handle /skill preview when no agent running
+          {:ok, {:skill_preview, skill_name, content}} ->
+            Owl.IO.puts("\n" <> Owl.Data.tag("=== SKILL: #{skill_name} ===", :cyan))
+            Owl.IO.puts(content)
+            Owl.IO.puts(Owl.Data.tag("(No active agent session running to inject into)", :yellow))
+
+          # Handle /skill install
+          {:ok, {:skill_installed, path}} ->
+            Owl.IO.puts(Owl.Data.tag("✓ Successfully installed skill to: #{path}", :green))
+
+          # Handle /skill reload
+          {:ok, :skills_reloaded} ->
+            Owl.IO.puts(Owl.Data.tag("✓ Skills re-scanned and registry updated.", :green))
 
           # Handle /reload result
           {:ok, %{"id" => id, "history" => history, "title" => title}} ->
@@ -181,25 +306,18 @@ defmodule ProCoder.UI.ViewLayer.TuiView do
   end
 
   defp handle_natural_language_goal(goal, parent) do
-    active_agent_pid = GenServer.call(parent, {:get_active_agent})
-    state = :sys.get_state(parent) # Get session_id from state
-    session_id = state.session_id
+    case GenServer.call(parent, {:submit_goal, goal}) do
+      :starting ->
+        Owl.IO.puts(Owl.Data.tag("\n◌ Preparing your workspace…\n", :cyan))
 
-    if active_agent_pid && Process.alive?(active_agent_pid) do
-      # Reuse the existing agent for multi-turn
-      GenServer.cast(active_agent_pid, {:plan, goal})
-      Owl.IO.puts(Owl.Data.tag("Continuing session #{session_id} with agent #{inspect(active_agent_pid)}", :cyan))
-    else
-      # Spawn a new agent for the session. We set force_fresh: false here 
-      # so that if an agent crashes and restarts, it RESTORES its history.
-      # Users can still use /new to start a truly fresh session.
-      case SessionManager.spawn_agent(session_id, goal, force_fresh: false) do
-        {:ok, pid} ->
-          GenServer.cast(parent, {:set_active_agent, pid})
-          Owl.IO.puts(Owl.Data.tag("Agent spawned (PID: #{inspect(pid)}) for goal: #{goal}", :green))
-        {:error, reason} ->
-          Owl.IO.puts(Owl.Data.tag("Failed to spawn agent: #{inspect(reason)}", :red))
-      end
+      :continued ->
+        Owl.IO.puts(Owl.Data.tag("\n↳ Added to the current session.\n", :cyan))
+
+      :busy ->
+        Owl.IO.puts(Owl.Data.tag("\nThe current workspace is still being prepared. Please wait.\n", :yellow))
+
+      {:error, reason} ->
+        Owl.IO.puts(Owl.Data.tag("\nCould not start provisioning: #{inspect(reason)}\n", :red))
     end
   end
 

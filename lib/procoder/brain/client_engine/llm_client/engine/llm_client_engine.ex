@@ -8,7 +8,6 @@ defmodule ProCoder.Brain.Client.Engine do
   require Logger
 
   alias ProCoder.Brain.Client.HTTPPool.Manager, as: HTTPPool
-  alias ProCoder.Brain.Client.SSEParser
   alias ProCoder.Brain.RateLimiter
 
   @type state :: %{
@@ -45,18 +44,13 @@ defmodule ProCoder.Brain.Client.Engine do
   end
 
   @impl true
-  def handle_call({:stream, caller, _context, opts}, _from, state) do
+  def handle_call({:stream, caller, context, opts}, _from, state) do
     case RateLimiter.consume(1) do
       :ok ->
-        case prepare_request(opts) do
-          {:ok, pool_name} ->
-            {:ok, parser_pid} = SSEParser.start_link(caller: caller, config: [])
-            
-            # Initiate Finch stream
-            # Note: Implementation detail assumes Finch is used via the pool manager
-            ref = make_ref()
-            {:reply, {:ok, ref}, %{state | pool_name: pool_name, caller: caller, parser: parser_pid, stream_ref: ref}}
-          
+        case ProCoder.Brain.Client.Adapters.OpenAIAdapter.stream(caller, context, opts) do
+          {:ok, ref} ->
+            {:reply, {:ok, ref}, %{state | caller: caller, stream_ref: ref}}
+
           error ->
             {:reply, error, state}
         end
@@ -90,7 +84,6 @@ defmodule ProCoder.Brain.Client.Engine do
   end
 
   defp perform_sync_request(_pool, context, opts) do
-    # Delegate to the GeminiAdapter for real interactions
-    ProCoder.Brain.Client.Adapters.GeminiAdapter.chat(context, opts)
+    ProCoder.Brain.Client.Adapters.OpenAIAdapter.chat(context, opts)
   end
 end

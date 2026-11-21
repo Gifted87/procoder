@@ -3,8 +3,8 @@ defmodule ProCoder.Core.AgentFSM do
   The primary cognitive controller for an individual autonomous coding agent.
   Implements a gen_statem to manage transitions across the agent lifecycle.
 
-  Tool use is powered by the Gemini native Function Calling API:
-    - The adapter sends all tools as typed function_declarations with mode: ANY.
+  Tool use is powered by an OpenAI-compatible Chat Completions API:
+    - The adapter sends all tools as typed OpenAI function tools.
     - Each LLM turn returns {:ok, %{thought: t, tool_calls: [{name, args}]}} —
       zero JSON parsing required.
     - Multiple tool calls per turn are dispatched via execute_batch / verify_batch
@@ -15,7 +15,7 @@ defmodule ProCoder.Core.AgentFSM do
 
   require Logger
   alias ProCoder.Brain.Client.Engine, as: LLMEngine
-  alias ProCoder.Brain.Client.Adapters.GeminiAdapter
+  alias ProCoder.Brain.Client.Adapters.OpenAIAdapter
   alias ProCoder.Core.Types.Message
   alias ProCoder.Search.Coordinator.Server, as: SearchCoordinator
   alias ProCoder.Brain.PromptLogic.Engine.Core.Orchestrator
@@ -203,24 +203,30 @@ defmodule ProCoder.Core.AgentFSM do
     # Allow explicit history overrides (e.g., from archives)
     provided_history = Keyword.get(opts, :history)
     force_fresh = Keyword.get(opts, :force_fresh, false)
+    specialist_module = Keyword.get(opts, :specialist_module)
 
     data = 
       cond do
         provided_history != nil ->
           Logger.info("[AgentFSM] Starting with provided history for #{session_id}")
-          new_data = %{start_fresh(session_id, worktree_root, goal, source_root) | history: provided_history}
+          new_data = %{start_fresh(session_id, worktree_root, goal, source_root, specialist_module) | history: provided_history}
           push_snapshot(new_data)
           new_data
 
         force_fresh ->
           Logger.info("[AgentFSM] Force fresh start for #{session_id} - skipping history hydration.")
-          start_fresh(session_id, worktree_root, goal, source_root)
+          start_fresh(session_id, worktree_root, goal, source_root, specialist_module)
 
         true ->
           case HistoryStackEngine.peek(session_id) do
             {:ok, snap} ->
               Logger.info("[AgentFSM] Restoring state for #{session_id} from snapshot #{snap.snapshot_id}")
               restored = :erlang.binary_to_term(snap.memory_blob)
+              restored =
+                restored
+                |> Map.put_new(:specialist_module, specialist_module)
+                |> Map.put_new(:specialist_skills, get_specialist_skills(specialist_module))
+                |> Map.put_new(:specialist_persona, get_specialist_persona(specialist_module))
 
               # If the incoming goal differs from what was snapshotted, this is a
               # follow-up request after the previous session finished. Inject the
@@ -250,9 +256,11 @@ defmodule ProCoder.Core.AgentFSM do
 
             {:error, _} ->
               Logger.info("[AgentFSM] Starting fresh state for #{session_id}")
-              start_fresh(session_id, worktree_root, goal, source_root)
+              start_fresh(session_id, worktree_root, goal, source_root, specialist_module)
           end
       end
+
+    Process.put(:procoder_tui_pid, Keyword.get(opts, :ui_pid))
 
     # Initialize agent_message.md and open it in VS Code
     msg_path = Path.join(worktree_root, "agent_message.md")
@@ -265,18 +273,35 @@ defmodule ProCoder.Core.AgentFSM do
     end
     
     # Explicitly report the absolute path in the terminal so the user can find it
-    IO.puts("\n" <> IO.ANSI.bright() <> IO.ANSI.yellow() <> ">>> Agent Message Log (Absolute Path): " <> IO.ANSI.reset() <> msg_path <> "\n")
+    Logger.info("[AgentFSM] Message log: #{msg_path}")
 
     {:ok, :active, data, [{:next_event, :internal, :think}]}
   end
 
-  defp start_fresh(session_id, worktree_root, goal, source_root) do
+  defp start_fresh(session_id, worktree_root, goal, source_root, specialist_module \\ nil) do
+    if specialist_module && Code.ensure_loaded?(specialist_module) do
+      ProCoder.Core.AgentLogic.ToolDefinitions.register_module_skills(specialist_module)
+    end
+
+    specialist_skills = get_specialist_skills(specialist_module)
+    specialist_persona = get_specialist_persona(specialist_module)
+
     new_data = %{
       session_id: session_id,
       worktree_root: worktree_root,
       goal: goal,
       status: :discovery,
-      history: [],
+      specialist_module: specialist_module,
+      specialist_skills: specialist_skills,
+      specialist_persona: specialist_persona,
+      history: [
+        %Message{
+          role: :user,
+          content: "NEW TASK: #{goal}",
+          salience_score: 1.0,
+          timestamp: DateTime.utc_now()
+        }
+      ],
       research_results: [],
       active_task: nil,
       metadata: %{},
@@ -289,6 +314,24 @@ defmodule ProCoder.Core.AgentFSM do
     # Store initial state for a fresh run
     push_snapshot(new_data)
     new_data
+  end
+
+  defp get_specialist_skills(nil), do: []
+  defp get_specialist_skills(mod) when is_atom(mod) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :__skills__, 0) do
+      mod.__skills__()
+    else
+      []
+    end
+  end
+
+  defp get_specialist_persona(nil), do: nil
+  defp get_specialist_persona(mod) when is_atom(mod) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :persona, 0) do
+      mod.persona()
+    else
+      nil
+    end
   end
 
 
@@ -348,16 +391,21 @@ defmodule ProCoder.Core.AgentFSM do
               high_salience_history
           end
 
-        # 5. Call LLM — adapter returns {:ok, %{thought: t, tool_calls: [{name, args}]}}
-        case LLMEngine.chat(final_messages, []) do
+        # 5. Call LLM — adapter returns normalized tool-call tuples.
+        notify_tui(data, :thinking)
+        llm_result =
+          try do
+            LLMEngine.chat(final_messages, [])
+          catch
+            :exit, reason -> {:error, {:llm_engine_exit, reason}}
+          end
+
+        case llm_result do
           {:ok, %{thought: thought, tool_calls: calls}} ->
             Logger.info("[FSM] LLM turn successful. Thought length: #{String.length(thought || "")}")
             Logger.info("[FSM] LLM thought: #{thought}")
-            
-            # Explicitly display thoughts to the terminal for user visibility
-            if thought && thought != "" do
-              IO.puts("\n" <> IO.ANSI.bright() <> IO.ANSI.cyan() <> "Agent Thought: " <> IO.ANSI.reset() <> thought <> "\n")
-            end
+
+            if calls != [], do: notify_tui(data, {:tools, Enum.map(calls, &elem(&1, 0))})
 
             if calls == [] do
               # Bare text or thought only — nudge and retry (similar to old :no_tool_call error)
@@ -388,6 +436,7 @@ defmodule ProCoder.Core.AgentFSM do
 
           {:error, reason} ->
             Logger.error("[FSM] LLM call failed: #{inspect(reason)}")
+            notify_tui(data, {:llm_error, reason})
             # Brief pause before retrying to avoid hammering on transient errors
             {:keep_state, data, [{{:timeout, :rate_limit_retry}, 5_000, :think}]}
         end
@@ -447,13 +496,15 @@ defmodule ProCoder.Core.AgentFSM do
         end
       end)
 
+    notify_tui(data, {:tools_done, Enum.map(results, &elem(&1, 0))})
+
     # Git-commit the changes
     Enum.each(results, fn {name, _} ->
       commit_changes(data.worktree_root, "Tool: #{name} result committed")
     end)
 
-    # Build the native Gemini functionResponse turn
-    tool_result_turn = GeminiAdapter.build_tool_result_turn(results)
+    # Build the internal tool-result turn; the active adapter encodes it for the API.
+    tool_result_turn = OpenAIAdapter.build_tool_result_turn(results)
 
     # Log outcomes
     Enum.each(results, fn {name, result} ->
@@ -508,7 +559,7 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
         sync_agent_message(new_data, msg, header: "FINAL REPORT")
 
         push_snapshot(new_data)
-        {:stop, :normal, new_data}
+        {:next_state, :idle, new_data}
 
       # transition_phase: advance the FSM phase and continue thinking.
       # Inject a context anchor INTO the existing tool result turn (same user role)
@@ -560,8 +611,30 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
   defp get_system_segments(data, phase) do
     phase_instruction = phase_instructions(phase)
 
+    specialist_segments =
+      if data[:specialist_module] do
+        persona_text = data[:specialist_persona] || "You are a specialized agent: #{inspect(data[:specialist_module])}."
+        skills_text =
+          if data[:specialist_skills] && data[:specialist_skills] != [] do
+            "\n\nYou have custom domain skills available as tools: #{Enum.map_join(data[:specialist_skills], ", ", &to_string/1)}. Always utilize your domain skills when addressing relevant requirements."
+          else
+            ""
+          end
+
+        [%{role: :system, content: "### SPECIALIST PERSONA & DOMAIN SKILLS:\n" <> persona_text <> skills_text, salience_score: 1.0}]
+      else
+        []
+      end
+
     # Lean system prompt: persona + DSL spec + phase instruction only.
     # Tool descriptions live in ToolDefinitions (sent as function_declarations to Gemini).
+    # Phase 1: Progressive Disclosure - External Skills Manifest
+    manifest_segment =
+      case ProCoder.Skills.ExternalSkillRegistry.compact_manifest(data.worktree_root) do
+        "" -> []
+        manifest -> [%{role: :system, content: manifest, salience_score: 0.95}]
+      end
+
     base_segments = [
       %{role: :system, content: @persona_template, salience_score: 1.0},
       %{role: :system, content: @cdms_doctrine, salience_score: 1.0},
@@ -571,7 +644,7 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
       %{role: :system, content: "OVERALL GOAL: #{data.goal}", salience_score: 1.0},
       %{role: :system, content: "WORKSPACE ROOT (worktree clone): #{data.worktree_root}", salience_score: 0.9},
       %{role: :system, content: "SOURCE ROOT (real project — use write_file and run_in_source for this): #{data.source_root || "not configured"}", salience_score: 0.95}
-    ]
+    ] ++ specialist_segments ++ manifest_segment
 
     if data.active_task do
       task_info = """
@@ -1217,9 +1290,113 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
         # Return a special tuple the verify_batch handler will pick up
         {:transition_phase, next_phase}
 
-      _ -> {:error, "Unknown tool: #{action}"}
+      "load_skill" ->
+        skill_name = args["skill_name"] || args[:skill_name]
+        if is_binary(skill_name) and byte_size(skill_name) > 0 do
+          case ProCoder.Skills.ExternalSkillRegistry.load_skill_content(skill_name) do
+            {:ok, doc} ->
+              Logger.info("[SKILLS] Loaded external skill instructions for '#{skill_name}' (#{byte_size(doc)} bytes)")
+              {:ok, doc}
+            {:error, reason} ->
+              Logger.warning("[SKILLS] Failed to load skill '#{skill_name}': #{inspect(reason)}")
+              {:error, "Skill '#{skill_name}' not found or could not be loaded: #{inspect(reason)}"}
+          end
+        else
+          {:error, "Missing required argument 'skill_name'"}
+        end
+
+      "install_skill" ->
+        source = args["source"] || args[:source]
+        scope = String.to_atom(args["scope"] || args[:scope] || "project")
+        name = args["name"] || args[:name]
+        opts = [scope: scope, project_root: data.worktree_root]
+        opts = if name, do: Keyword.put(opts, :name, name), else: opts
+
+        if is_binary(source) and byte_size(source) > 0 do
+          case ProCoder.Skills.ExternalSkillRegistry.install_skill(source, opts) do
+            {:ok, installed_path} ->
+              {:ok, "Skill installed successfully at: #{installed_path}. The skill is now registered and ready to use via load_skill."}
+            {:error, reason} ->
+              {:error, "Failed to install skill from #{source}: #{inspect(reason)}"}
+          end
+        else
+          {:error, "Missing required argument 'source'"}
+        end
+
+      "run_skill_script" ->
+        skill_name = args["skill_name"] || args[:skill_name]
+        script_name = args["script_name"] || args[:script_name]
+        script_args = args["args"] || args[:args] || []
+
+        if skill_name && script_name do
+          case ProCoder.Skills.ExternalSkillRegistry.execute_skill_script(skill_name, script_name, script_args, data.worktree_root) do
+            {:ok, output} ->
+              {:ok, output}
+            {:error, reason} ->
+              {:error, "Skill script execution failed: #{inspect(reason)}"}
+          end
+        else
+          {:error, "Missing required arguments 'skill_name' and 'script_name'"}
+        end
+
+      "read_skill_resource" ->
+        skill_name = args["skill_name"] || args[:skill_name]
+        resource_path = args["resource_path"] || args[:resource_path]
+
+        if skill_name && resource_path do
+          case ProCoder.Skills.ExternalSkillRegistry.read_skill_resource(skill_name, resource_path) do
+            {:ok, content} ->
+              {:ok, content}
+            {:error, reason} ->
+              {:error, "Failed to read skill resource '#{resource_path}' in '#{skill_name}': #{inspect(reason)}"}
+          end
+        else
+          {:error, "Missing required arguments 'skill_name' and 'resource_path'"}
+        end
+
+      _ ->
+        cond do
+          data[:specialist_module] && action_in_specialist?(data[:specialist_module], action) ->
+            execute_specialist_skill(data[:specialist_module], action, args)
+
+          handler = ProCoder.Core.AgentLogic.ToolDefinitions.get_skill_handler(action) ->
+            execute_specialist_skill(handler, action, args)
+
+          true ->
+            {:error, "Unknown tool: #{action}"}
+        end
     end
   end
+
+  defp action_in_specialist?(mod, action) when is_atom(mod) and is_binary(action) do
+    if Code.ensure_loaded?(mod) do
+      skills = if function_exported?(mod, :__skills__, 0), do: mod.__skills__(), else: []
+      action_atom = try do String.to_existing_atom(action) rescue _ -> nil end
+      (action_atom != nil and action_atom in skills) or function_exported?(mod, String.to_atom(action), 1)
+    else
+      false
+    end
+  end
+  defp action_in_specialist?(_, _), do: false
+
+  defp execute_specialist_skill(mod, action, args) when is_atom(mod) do
+    Logger.info("[ACTUATOR] Executing custom skill '#{action}' on module #{inspect(mod)}")
+    cond do
+      function_exported?(mod, :execute_skill, 2) ->
+        mod.execute_skill(action, args)
+
+      function_exported?(mod, String.to_atom(action), 1) ->
+        apply(mod, String.to_atom(action), [args])
+
+      true ->
+        {:error, "Specialist module #{inspect(mod)} does not implement skill '#{action}'"}
+    end
+  rescue
+    e ->
+      Logger.error("[ACTUATOR] Skill execution error in #{inspect(mod)}.#{action}: #{Exception.message(e)}")
+      {:error, "Skill execution failed: #{Exception.message(e)}"}
+  end
+  defp execute_specialist_skill(_, action, _), do: {:error, "Invalid handler for skill '#{action}'"}
 
 
   defp format_search_results(results) do
@@ -1293,7 +1470,7 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
   end
 
   defp handle_common_event(:cast, {:plan, goal}, _state, data) do
-    IO.puts(">>> Agent receiving new goal: #{goal}")
+    Logger.info("[AgentFSM] Receiving new goal: #{goal}")
     Logger.info("Agent received new goal from any state — restarting discovery.")
 
     # Guard against native Gemini map turns (non-struct) in history when filtering.
@@ -1379,7 +1556,7 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
       "read_file" -> :read
       "run_in_source" -> :shell
       "delete_file" -> :delete
-      _ -> :read
+      _ -> :skill_execution
     end
   end
 
@@ -1510,6 +1687,13 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
     CacheEngine.write_memory(data.session_id, :last_thought, thought)
     new_data = push_snapshot(new_data)
     {:keep_state, new_data, [{:next_event, :internal, {:execute_batch, calls}}]}
+  end
+
+  defp notify_tui(%{session_id: session_id}, event) do
+    case Process.get(:procoder_tui_pid) do
+      pid when is_pid(pid) -> send(pid, {:agent_event, session_id, event})
+      _ -> :ok
+    end
   end
 
   defp handle_no_tool_call(thought, data) do
@@ -1655,7 +1839,7 @@ Make sure you do NOT stop until the goal is **fully achieved**. You MUST follow 
             end)
 
             # Build the results turn
-            tool_result_turn = GeminiAdapter.build_tool_result_turn(results)
+            tool_result_turn = OpenAIAdapter.build_tool_result_turn(results)
             
             # Append result turn and recurse
             run_validator_audit_loop(messages ++ [tool_result_turn], turns - 1, data)

@@ -33,6 +33,7 @@ defmodule ProCoder.UI.RoutingLayer.CommandRouter do
   """
   @spec dispatch(atom(), map()) :: :ok | {:error, term()}
   def dispatch(command, args) do
+    args = Map.put_new(args, :cmd, command)
     case lookup_command(command) do
       {:ok, {module, function}} ->
         apply(module, function, [args])
@@ -67,7 +68,7 @@ defmodule ProCoder.UI.RoutingLayer.CommandRouter do
       [{^cmd, handler}] -> {:ok, handler}
       [] -> 
         # Fallback for hardcoded "Slash" commands
-        if cmd in [:add, :drop, :rewind, :swarm, :compact, :stop, :help, :list, :reload] do
+        if cmd in [:add, :drop, :rewind, :swarm, :compact, :stop, :help, :list, :reload, :skills, :skill] do
           {:ok, {__MODULE__, :handle_slash}}
         else
           {:error, :command_not_found}
@@ -78,9 +79,10 @@ defmodule ProCoder.UI.RoutingLayer.CommandRouter do
   def handle_slash(args) do
     # Extract session_id from args or use default
     session_id = Map.get(args, :session_id, "default_session")
+    cmd = Map.get(args, :cmd)
     
     # Dispatch to specific subsystems
-    case args.cmd do
+    case cmd do
       :add -> 
         path = normalize_path(args.path)
         ProCoder.Memory.ContextStore.inject(session_id, path)
@@ -100,6 +102,71 @@ defmodule ProCoder.UI.RoutingLayer.CommandRouter do
             end
           _ -> 
             {:error, :agent_not_found}
+        end
+      :skills ->
+        sub = args[:subcommand] || "list"
+        case sub do
+          "reload" ->
+            ProCoder.Skills.ExternalSkillRegistry.rescan()
+            {:ok, :skills_reloaded}
+
+          _ ->
+            skills = ProCoder.Skills.ExternalSkillRegistry.list_skills()
+            {:ok, {:skills_list, skills}}
+        end
+      :skill ->
+        action = args[:action] || "list"
+        target = args[:target]
+
+        case action do
+          "read" ->
+            skill_name = target || args[:path]
+            pid = args[:pid] || find_agent_pid(session_id)
+            if pid && Process.alive?(pid) do
+              case ProCoder.Skills.ExternalSkillRegistry.tell_agent_read_skill(pid, skill_name) do
+                {:ok, _} -> {:ok, {:skill_read_directed, skill_name}}
+                :ok -> {:ok, {:skill_read_directed, skill_name}}
+                {:error, reason} -> {:error, reason}
+              end
+            else
+              case ProCoder.Skills.ExternalSkillRegistry.load_skill_content(skill_name) do
+                {:ok, content} -> {:ok, {:skill_preview, skill_name, content}}
+                {:error, reason} -> {:error, reason}
+              end
+            end
+
+          "load" ->
+            skill_name = target || args[:path]
+            pid = args[:pid] || find_agent_pid(session_id)
+            if pid && Process.alive?(pid) do
+              case ProCoder.Skills.ExternalSkillRegistry.tell_agent_read_skill(pid, skill_name) do
+                {:ok, _} -> {:ok, {:skill_read_directed, skill_name}}
+                :ok -> {:ok, {:skill_read_directed, skill_name}}
+                {:error, reason} -> {:error, reason}
+              end
+            else
+              case ProCoder.Skills.ExternalSkillRegistry.load_skill_content(skill_name) do
+                {:ok, content} -> {:ok, {:skill_preview, skill_name, content}}
+                {:error, reason} -> {:error, reason}
+              end
+            end
+
+          "install" ->
+            source = target || args[:path]
+            scope = String.to_atom(args[:scope] || "project")
+            project_root = Application.get_env(:procoder, ProCoder.SessionManager)[:source_root] || File.cwd!()
+            case ProCoder.Skills.ExternalSkillRegistry.install_skill(source, scope: scope, project_root: project_root) do
+              {:ok, path} -> {:ok, {:skill_installed, path}}
+              {:error, reason} -> {:error, reason}
+            end
+
+          "reload" ->
+            ProCoder.Skills.ExternalSkillRegistry.rescan()
+            {:ok, :skills_reloaded}
+
+          _ ->
+            skills = ProCoder.Skills.ExternalSkillRegistry.list_skills()
+            {:ok, {:skills_list, skills}}
         end
       :swarm -> 
         ProCoder.Core.OrchestrationLayer.SessionManagerImpl.SupervisorCore.SessionManager.spawn_agent(session_id, args[:goal] || "Swarm collaboration")
@@ -136,16 +203,21 @@ defmodule ProCoder.UI.RoutingLayer.CommandRouter do
   defp display_help do
     IO.puts("""
     Available Slash Commands:
-    /add <path>    - Inject file into context
-    /drop <path>   - Evict file from context
-    /rewind        - Undo last agent action
-    /swarm <goal>  - Spawn a sub-agent
-    /new           - Start a fresh conversation session
-    /stop          - Terminate the current agent session
-    /list          - List archived conversations
-    /reload <id>   - Reload an archived conversation
-    /compact       - Force memory compaction
-    /help          - Show this help
+    /add <path>               - Inject file into context
+    /drop <path>              - Evict file from context
+    /rewind                   - Undo last agent action
+    /skills                   - List all available Claude/Codex skills
+    /skill read <name>        - Command active agent to activate & read a skill
+    /skill install <url>      - Install a skill from Git/URL
+    /skill reload             - Rescan skill directories
+    /swarm <goal>             - Spawn a sub-agent
+    /new                      - Start a fresh conversation session
+    /stop                     - Terminate the current agent session
+    /list                     - List archived conversations
+    /reload <id>              - Reload an archived conversation
+    /compact                  - Force memory compaction
+    /help                     - Show this help
+    /quit                     - Exit ProCoder
     """)
   end
 

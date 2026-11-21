@@ -10,6 +10,7 @@ defmodule ProCoder.Config.RuntimeInitializer do
   Initializes global runtime configuration.
   """
   def init_runtime_config! do
+    load_env_file()
     Logger.info("[Config] Initializing runtime configuration...")
     
     # Check for required environment variables
@@ -46,5 +47,28 @@ defmodule ProCoder.Config.RuntimeInitializer do
     Logger.info("[Config] Local persistence enabled at: #{db_path}")
 
     :ok
+  end
+
+  # --- Internal Helpers ---
+
+  defp load_env_file do
+    env_path = ".env"
+    if File.exists?(env_path) do
+      Logger.info("[Config] Loading environment variables from #{env_path}...")
+      File.read!(env_path)
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == "" or String.starts_with?(&1, "#")))
+      |> Enum.each(fn line ->
+        case String.split(line, "=", parts: 2) do
+          [key, value] -> 
+            val = String.trim(value) |> String.trim("\"")
+            System.put_env(String.trim(key), val)
+          _ -> :ok
+        end
+      end)
+    else
+      Logger.debug("[Config] No .env file found at #{env_path}. Using existing system environment.")
+    end
   end
 end

@@ -17,6 +17,7 @@ defmodule ProCoder.Brain.Client.Adapters.GeminiAdapter do
 
   require Logger
   alias ProCoder.Core.AgentLogic.ToolDefinitions
+  alias ProCoder.Brain.Client.KeyRotator
 
   @base_url "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.1-pro-preview:generateContent"
   # ---------------------------------------------------------------------------
@@ -30,17 +31,17 @@ defmodule ProCoder.Brain.Client.Adapters.GeminiAdapter do
   end
 
   defp get_api_keys do
-    # Use environment variables if set, otherwise fallback to the user-provided rotation pool.
-    keys_str = System.get_env("PROCODER_LLM_API_KEYS") || System.get_env("PROCODER_LLM_API_KEY")
-    
-    if keys_str && keys_str != "" do
-      keys_str
-      |> String.split(",")
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
-    else
-      # No hardcoded keys allowed. Must be set via environment.
-      []
+    # Fetch rotated list of keys from the global KeyRotator.
+    # This ensures every call starts with the 'next' key in the sequential rotation.
+    case KeyRotator.get_keys() do
+      [] -> 
+        # Fallback to single key if rotator is empty (legacy/safety)
+        System.get_env("PROCODER_LLM_API_KEY") 
+        |> case do
+          nil -> []
+          key -> [key]
+        end
+      keys -> keys
     end
   end
 

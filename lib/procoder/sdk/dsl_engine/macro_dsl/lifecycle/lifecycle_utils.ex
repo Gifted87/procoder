@@ -62,7 +62,7 @@ defmodule ProCoder.SDK.DSL.Lifecycle.LifecycleUtils do
       @behaviour :gen_statem
 
       @impl true
-      def callback_mode, do: :state_functions
+      def callback_mode, do: [:state_functions, :handle_event_function]
 
       @impl true
       def init(opts) do
