@@ -11,11 +11,17 @@ erl_crash.dump
 
 # ProCoder Internal State (Agent Caching & History)
 /.procoder/
+.procoder/session_logs/
 /.cdms_model/
 /.archives/
 /.shadow/
+.shadow/
 /workspaces/
 /reports/
+
+# Scratch & Staging
+scratch/
+/scratch/
 
 # Databases (SQLite)
 *.db
@@ -42,6 +48,7 @@ config/app_config/env_configs/*.secret.exs
 ast_output.txt
 structural_analysis.txt
 procoder_compiled_codebase.txt
+compiled_codebase.txt
 repro_*.exs
 reproduce_*.exs
 test_*.exs
